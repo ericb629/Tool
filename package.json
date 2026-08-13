@@ -38,8 +38,7 @@
   "dependencies": {
     "pdfjs-dist": "^6.2.108",
     "react": "^19.2.8",
-    "react-dom": "^19.2.8",
-    "react-resizable-panels": "^4.12.2"
+    "react-dom": "^19.2.8"
   },
   "allowScripts": {
     "electron-winstaller@5.4.0": true,

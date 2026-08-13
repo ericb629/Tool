@@ -21,6 +21,7 @@ interface PdfEditorPanelProps {
   manifest: PdfFileManifest
   layerId: Uuid
   quantityResult: QuantityResult | undefined
+  active?: boolean
   onDocumentLoaded: (pageCount: number) => void
   onSaveCalibration: (calibration: PageCalibration) => void
   onSaveMarkup: (markup: MarkupObject) => void
@@ -38,6 +39,7 @@ export default function PdfEditorPanel({
   manifest,
   layerId,
   quantityResult,
+  active = true,
   onDocumentLoaded,
   onSaveCalibration,
   onSaveMarkup
@@ -200,6 +202,7 @@ export default function PdfEditorPanel({
     <div className="pdf-editor">
       <PdfViewer
         fileId={fileId}
+        active={active}
         onDocumentLoaded={onDocumentLoaded}
         renderOverlay={renderOverlay}
         onPagePointerDown={handlePointerDown}

@@ -23,6 +23,14 @@ interface PdfViewerProps {
    * whole.
    */
   fileId: string
+  /**
+   * False while this tab is in the background. The document and its
+   * IpcRangeTransport stay open (switching tabs must not close the
+   * main-process file handle), but no page canvases are mounted, so pdf.js
+   * render structures are released. One 465MB set costs ~800MB fully live;
+   * only the active tab pays that.
+   */
+  active?: boolean
   onDocumentLoaded?: (pageCount: number) => void
   renderOverlay?: (ctx: CanvasRenderingContext2D, context: PageOverlayContext) => void
   onPagePointerDown?: (event: React.PointerEvent<HTMLCanvasElement>, context: PageOverlayContext) => void
@@ -32,6 +40,7 @@ interface PdfViewerProps {
 
 export default function PdfViewer({
   fileId,
+  active = true,
   onDocumentLoaded,
   renderOverlay,
   onPagePointerDown,
@@ -80,7 +89,11 @@ export default function PdfViewer({
         return
       }
 
-      transport = new IpcRangeTransport(fileId, opened.length, opened.initialData)
+      transport = new IpcRangeTransport(fileId, opened.length, opened.initialData, (message) => {
+        if (cancelled) return
+        setStatus('error')
+        setErrorMessage(message)
+      })
       // disableAutoFetch is what makes this a real win: without it pdf.js
       // walks the entire document in the background and memory returns to
       // the whole-file figure while still appearing to work.
@@ -190,6 +203,10 @@ export default function PdfViewer({
 
   // ---- visible range -------------------------------------------------
   const visibleRange = useMemo(() => {
+    // Background tab: mount nothing. PdfPageCanvas's unmount cancels its
+    // render task and calls page.cleanup(), which is what actually frees the
+    // memory - the document itself stays loaded for an instant switch back.
+    if (!active) return { start: 1, end: 0 }
     if (layout.pages.length === 0) return { start: 1, end: 0 }
     const viewTop = scrollTop
     const viewBottom = scrollTop + (containerSize.height || 1)
@@ -211,7 +228,20 @@ export default function PdfViewer({
       start: Math.max(1, start - OVERSCAN_PAGES),
       end: Math.min(layout.pages.length, end + OVERSCAN_PAGES)
     }
-  }, [layout, scrollTop, containerSize.height, currentPage])
+  }, [active, layout, scrollTop, containerSize.height, currentPage])
+
+  // Coming back to the foreground: the scroll container was display:none, and
+  // browsers do not reliably preserve scrollTop across that, so restore the
+  // position this tab was left at.
+  useEffect(() => {
+    if (!active) return
+    const element = scrollRef.current
+    if (!element || element.scrollTop === scrollTop) return
+    element.scrollTop = scrollTop
+    // Only on activation - during normal scrolling the DOM is the source of
+    // truth and writing back would fight the user.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active])
 
   // Track which page is "current" for the page indicator: the one covering
   // the vertical middle of the viewport.

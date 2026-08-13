@@ -22,7 +22,13 @@ export class IpcRangeTransport extends PDFDataRangeTransport {
   constructor(
     private readonly fileId: string,
     length: number,
-    initialData: Uint8Array
+    initialData: Uint8Array,
+    /**
+     * Called when a chunk cannot be delivered. Without this the failure is
+     * silent and terminal: pdf.js waits for data that will never arrive, so
+     * the page simply never finishes rendering and nothing says why.
+     */
+    private readonly onChunkError?: (message: string) => void
   ) {
     super(length, initialData)
   }
@@ -45,10 +51,12 @@ export class IpcRangeTransport extends PDFDataRangeTransport {
       })
       .catch((err) => {
         if (this.aborted) return
-        // Surfacing this as a rejected range would hang the page render with
-        // no explanation, so make the failure visible.
+        const message = err instanceof Error ? err.message : String(err)
         // eslint-disable-next-line no-console
         console.error(`[pdf] chunk ${begin}-${end} failed for ${this.fileId}:`, err)
+        // Fail the document loudly. pdf.js has no way to be told a range
+        // failed, so the alternative is a page that stays blank forever.
+        this.onChunkError?.(`Could not read bytes ${begin}-${end} of this PDF: ${message}`)
       })
       .finally(() => {
         this.pending -= 1

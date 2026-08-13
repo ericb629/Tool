@@ -3,12 +3,20 @@ import type { ManifestStore } from './manifest/store'
 import { resolveWithinRoot } from './pathSafety'
 
 /**
- * Bytes handed back for one chunk request. pdf.js asks for 64KB at a time by
- * default; this ceiling exists so a buggy or hostile renderer cannot turn a
- * single call into "load the whole 500MB sheet set into memory", which is the
- * exact failure this module exists to prevent.
+ * Ceiling on one chunk request, so a single call cannot become "load the
+ * whole 500MB sheet set into memory" - the failure this module exists to
+ * prevent.
+ *
+ * Not as small as it looks tempting to make it. pdf.js requests 64KB at a
+ * time only while walking the file; when it needs one large object (an image
+ * XObject or a dense content stream) it asks for that object's exact byte
+ * range in a single call. A real 465MB civil set produced requests of
+ * 4,259,840 and 4,456,448 bytes, which a 4MiB ceiling rejected - and a
+ * rejected chunk is never delivered, so the page waited for it forever.
+ * 64MiB clears any plausible single PDF object while still being a small
+ * fraction of a large sheet set.
  */
-export const MAX_CHUNK_BYTES = 4 * 1024 * 1024
+export const MAX_CHUNK_BYTES = 64 * 1024 * 1024
 
 /**
  * Bytes sent up front with the document length. pdf.js can begin parsing the
@@ -50,6 +58,14 @@ export interface OpenResult {
  */
 export class PdfDataReader {
   private open = new Map<string, OpenDocument>()
+  /**
+   * fileIds that were opened and have since been closed. pdf.js can have a
+   * chunk request already in flight when a document is torn down, so that
+   * read lands after the handle is gone. Answering it with an empty chunk
+   * keeps teardown quiet, while an id that was NEVER opened still throws -
+   * that one is a real bug and must not be swallowed.
+   */
+  private closed = new Set<string>()
 
   constructor(private readonly store: ManifestStore) {}
 
@@ -66,6 +82,8 @@ export class PdfDataReader {
 
     const handle = await fs.open(safePath, 'r')
     try {
+      // Reopening makes it live again, so it is no longer "closed".
+      this.closed.delete(fileId)
       const { size } = await handle.stat()
       this.open.set(fileId, { handle, length: size, bytesServed: 0, chunkCount: 0 })
       const initialData = await this.readRange(fileId, 0, Math.min(INITIAL_CHUNK_BYTES, size))
@@ -85,7 +103,13 @@ export class PdfDataReader {
    */
   async readRange(fileId: string, begin: number, end: number): Promise<Uint8Array> {
     const doc = this.open.get(fileId)
-    if (!doc) throw new Error(`Document not open: ${fileId}`)
+    if (!doc) {
+      // Already torn down, with a request that was in flight at the time:
+      // answer emptily rather than raising. An id never opened at all is a
+      // genuine fault and still throws.
+      if (this.closed.has(fileId)) return new Uint8Array(0)
+      throw new Error(`Document not open: ${fileId}`)
+    }
 
     if (!Number.isInteger(begin) || !Number.isInteger(end)) {
       throw new Error(`Invalid range [${begin}, ${end})`)
@@ -115,6 +139,7 @@ export class PdfDataReader {
     const doc = this.open.get(fileId)
     if (!doc) return
     this.open.delete(fileId)
+    this.closed.add(fileId)
     if (process.env.TOOL_DEBUG_PDFDATA) {
       const pct = ((doc.bytesServed / doc.length) * 100).toFixed(1)
       // eslint-disable-next-line no-console

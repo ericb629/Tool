@@ -60,7 +60,16 @@ app.on('window-all-closed', () => {
   }
 })
 
-// Release any PDF file handles still held when the app exits.
-app.on('will-quit', () => {
-  void pdfDataReader.closeAll()
+// Release any PDF file handles still held when the app exits. closeAll is
+// async, so quitting has to be deferred until it finishes - otherwise the
+// process exits first and Node closes the descriptors on GC instead, which
+// it warns about (DEP0137) and will eventually treat as an error.
+let handlesReleased = false
+app.on('will-quit', (event) => {
+  if (handlesReleased) return
+  event.preventDefault()
+  void pdfDataReader.closeAll().finally(() => {
+    handlesReleased = true
+    app.quit()
+  })
 })
