@@ -1,0 +1,27 @@
+# Claude Code local settings (machine-specific; shared settings.json is fine to commit)
+.claude/settings.local.json
+
+# OS cruft
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# Secrets / env
+.env
+.env.*
+*.key
+*.pem
+
+# Common build/dependency output (harmless if unused)
+node_modules/
+dist/
+build/
+__pycache__/
+*.pyc
+venv/
+.venv/
