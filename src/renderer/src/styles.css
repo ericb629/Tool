@@ -53,3 +53,78 @@ body,
 .resize-handle:hover {
   background: #5a5a5a;
 }
+
+.live-link-panel {
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow: auto;
+  align-items: stretch;
+  text-align: left;
+}
+
+.live-link-panel__project-controls {
+  display: flex;
+  gap: 6px;
+}
+
+.live-link-panel__project-controls input {
+  flex: 1;
+  min-width: 0;
+  background: #2a2a2a;
+  color: #e8e8e8;
+  border: 1px solid #3a3a3a;
+  border-radius: 3px;
+  padding: 4px 6px;
+  font-size: 12px;
+}
+
+.live-link-panel__project-controls button {
+  background: #3a3a3a;
+  color: #e8e8e8;
+  border: 1px solid #4a4a4a;
+  border-radius: 3px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.live-link-panel__project-controls button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.live-link-panel__error {
+  color: #e88;
+  font-size: 12px;
+}
+
+.live-link-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.live-link-list__item {
+  border: 1px solid #3a3a3a;
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-size: 12px;
+  color: #e8e8e8;
+}
+
+.live-link-list__target {
+  color: #aaa;
+}
+
+.live-link-list__notes {
+  color: #888;
+  font-style: italic;
+}

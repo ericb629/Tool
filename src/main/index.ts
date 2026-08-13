@@ -1,5 +1,7 @@
 import { app, BrowserWindow, shell } from 'electron'
 import { join } from 'path'
+import { registerManifestIpcHandlers } from './ipc/manifest'
+import { ManifestStore } from './manifest/store'
 
 function createWindow(): void {
   const mainWindow = new BrowserWindow({
@@ -34,6 +36,10 @@ function createWindow(): void {
 }
 
 app.whenReady().then(() => {
+  // One ManifestStore per process: the app opens a single project in a
+  // single window (see ManifestStore's single-writer assumption).
+  registerManifestIpcHandlers(new ManifestStore())
+
   createWindow()
 
   app.on('activate', () => {
