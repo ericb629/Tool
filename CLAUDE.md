@@ -19,6 +19,10 @@ There is no test suite yet. `npm run typecheck` is the fastest correctness check
 
 Requires Node.js (currently developed against the 24.x LTS line) and npm. No `engines` field is set.
 
+## Git workflow
+
+Commit and push to GitHub (`origin/main`) regularly as work progresses — after each meaningful, working change, not just at the end of a session — so there is always a saved, revertible copy of the project. Use clean, descriptive commit messages that explain *why* the change was made, not just what changed. Don't let uncommitted work pile up.
+
 ## Architecture
 
 Three separate TypeScript build targets, orchestrated by `electron.vite.config.ts` (not a plain `vite.config.ts` — the `electron-vite` CLI reads this instead):
