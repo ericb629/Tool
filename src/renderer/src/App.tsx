@@ -207,7 +207,7 @@ export default function App() {
             fileId={tab.fileId}
             manifest={entry.manifest}
             layerId={layerId}
-            quantityResult={lastDrawnQuantity}
+            quantityForMarkup={(markupId) => quantityFor(tab.fileId, markupId)}
             active={isActive}
             onDocumentLoaded={(pageCount) => handleDocumentLoaded(tab.fileId, pageCount)}
             onSaveCalibration={(calibration) => handleSaveCalibration(tab.fileId, calibration)}

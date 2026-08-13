@@ -360,10 +360,13 @@ body,
   width: 100%;
 }
 
+/* Positioned entirely by the viewer, which sets `top` and `left` inline from
+   its computed layout. Centring here with left:50%/translateX(-50%) would
+   fight that: the inline `left` wins, but the transform still shifts every
+   page half its own width, mis-centring it and breaking cursor-anchored zoom,
+   whose maths assumes the DOM matches the computed layout. */
 .pdf-viewer__page-slot {
   position: absolute;
-  left: 50%;
-  transform: translateX(-50%);
 }
 
 .pdf-viewer__message {
@@ -397,9 +400,10 @@ body,
   display: block;
 }
 
-.pdf-page__canvas--overlay {
-  cursor: crosshair;
-}
+/* No cursor here on purpose. `cursor` inherits, and the scroll container sets
+   it from the active tool and the live pan state, so the pointer reflects the
+   current tool/mode over the pages too. A rule here would override all of
+   that with one hardcoded cursor. */
 
 .pdf-page__label {
   position: absolute;
@@ -724,4 +728,87 @@ body,
   background: #1e1e1e;
   display: flex;
   min-height: 0;
+}
+
+/* ---- tools, marquee, context menu ---- */
+
+.tool-palette {
+  display: flex;
+  gap: 4px;
+  padding: 5px 8px;
+  background: #232323;
+  border-bottom: 1px solid #3a3a3a;
+}
+
+.tool-palette__tool {
+  background: #3a3a3a;
+  color: #ccc;
+  border: 1px solid #4a4a4a;
+  border-radius: 3px;
+  padding: 4px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.tool-palette__tool--active {
+  background: #4aa3ff;
+  border-color: #6cb6ff;
+  color: #08213a;
+  font-weight: 600;
+}
+
+.tool-palette__tool:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.pdf-viewer__viewport {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.pdf-viewer__marquee {
+  position: absolute;
+  border: 1px solid #4aa3ff;
+  background: rgba(74, 163, 255, 0.15);
+  pointer-events: none;
+  z-index: 5;
+}
+
+.context-menu {
+  position: fixed;
+  z-index: 100;
+  min-width: 190px;
+  background: #2a2a2a;
+  border: 1px solid #4a4a4a;
+  border-radius: 4px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.55);
+  padding: 4px;
+}
+
+.context-menu__header {
+  font-size: 11px;
+  color: #999;
+  padding: 4px 8px;
+  border-bottom: 1px solid #3a3a3a;
+  margin-bottom: 4px;
+}
+
+.context-menu__item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  color: #ddd;
+  font-size: 12px;
+  padding: 5px 8px;
+  border-radius: 3px;
+}
+
+.context-menu__item:disabled {
+  color: #777;
+  cursor: default;
 }

@@ -2,52 +2,66 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import type { PDFDocumentProxy } from 'pdfjs-dist'
 import { pdfjsLib } from '../pdf/pdfjs'
 import { IpcRangeTransport } from '../pdf/IpcRangeTransport'
+import { canvasToPdfPoint } from '../pdf/coordinates'
+import { rectFromCorners, type UserSpaceRect } from '../pdf/hitTest'
+import {
+  applyZoomAnchor,
+  captureZoomAnchor,
+  computePageLayout,
+  type BasePageSize,
+  type ZoomAnchor
+} from '../pdf/zoomAnchor'
+import { behaviorForButton, type InteractionConfig } from '../tools/interaction'
+
+export type { InteractionConfig }
 import PdfPageCanvas, { type PageOverlayContext } from './PdfPageCanvas'
 
-/** Pages rendered beyond the visible range, so scrolling doesn't flash blank. */
 const OVERSCAN_PAGES = 1
 const PAGE_GAP = 12
-const ZOOM_STEPS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4, 6, 8]
+const ZOOM_STEPS = [0.1, 0.17, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4, 6, 8]
+const MIN_SCALE = 0.05
+const MAX_SCALE = 12
+/** Below this movement a press counts as a click, not a drag. */
+const DRAG_THRESHOLD_PX = 4
+/** And a click that lingers longer than this is treated as a drag attempt. */
+const CLICK_MAX_MS = 600
 
 export type ZoomMode = { kind: 'fit-width' } | { kind: 'fit-page' } | { kind: 'fixed'; scale: number }
 
-interface BasePageSize {
-  width: number
-  height: number
+export interface PageRectSelection {
+  pageNumber: number
+  rect: UserSpaceRect
 }
 
 interface PdfViewerProps {
-  /**
-   * Manifest fileId. Bytes are pulled from the main process in chunks via
-   * IpcRangeTransport as pdf.js needs them - the document is never loaded
-   * whole.
-   */
   fileId: string
-  /**
-   * False while this tab is in the background. The document and its
-   * IpcRangeTransport stay open (switching tabs must not close the
-   * main-process file handle), but no page canvases are mounted, so pdf.js
-   * render structures are released. One 465MB set costs ~800MB fully live;
-   * only the active tab pays that.
-   */
   active?: boolean
+  interaction: InteractionConfig
   onDocumentLoaded?: (pageCount: number) => void
   renderOverlay?: (ctx: CanvasRenderingContext2D, context: PageOverlayContext) => void
   onPagePointerDown?: (event: React.PointerEvent<HTMLCanvasElement>, context: PageOverlayContext) => void
+  onMarqueeComplete?: (selections: PageRectSelection[], additive: boolean) => void
+  onContextMenu?: (clientX: number, clientY: number) => void
   overlayRevision?: string | number
   toolbarExtras?: React.ReactNode
+  paletteSlot?: React.ReactNode
 }
 
 export default function PdfViewer({
   fileId,
   active = true,
+  interaction,
   onDocumentLoaded,
   renderOverlay,
   onPagePointerDown,
+  onMarqueeComplete,
+  onContextMenu,
   overlayRevision,
-  toolbarExtras
+  toolbarExtras,
+  paletteSlot
 }: PdfViewerProps) {
   const scrollRef = useRef<HTMLDivElement>(null)
+  const pageContexts = useRef(new Map<number, PageOverlayContext>())
 
   const [doc, setDoc] = useState<PDFDocumentProxy | undefined>(undefined)
   const [basePageSizes, setBasePageSizes] = useState<BasePageSize[]>([])
@@ -58,8 +72,12 @@ export default function PdfViewer({
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 })
   const [scrollTop, setScrollTop] = useState(0)
   const [currentPage, setCurrentPage] = useState(1)
+  const [isPanning, setIsPanning] = useState(false)
+  const [marqueeScreenRect, setMarqueeScreenRect] = useState<
+    { left: number; top: number; width: number; height: number } | undefined
+  >(undefined)
 
-  // ---- load document -------------------------------------------------
+  // ---- document ------------------------------------------------------
   useEffect(() => {
     let cancelled = false
     setStatus('loading')
@@ -82,8 +100,6 @@ export default function PdfViewer({
         }
         return
       }
-      // Unmounted while the open was in flight: release the handle main is
-      // now holding, or it leaks for the life of the process.
       if (cancelled) {
         void window.api.pdfData.close(fileId).catch(() => undefined)
         return
@@ -94,9 +110,6 @@ export default function PdfViewer({
         setStatus('error')
         setErrorMessage(message)
       })
-      // disableAutoFetch is what makes this a real win: without it pdf.js
-      // walks the entire document in the background and memory returns to
-      // the whole-file figure while still appearing to work.
       task = pdfjsLib.getDocument({ range: transport, disableAutoFetch: true, disableStream: true })
 
       try {
@@ -106,19 +119,12 @@ export default function PdfViewer({
           setStatus('empty')
           return
         }
-        // Measure every page once at scale 1 so the scroll container can be
-        // laid out (and virtualized) without rendering anything.
         const sizes: BasePageSize[] = []
         for (let pageNumber = 1; pageNumber <= loaded.numPages; pageNumber++) {
           const page = await loaded.getPage(pageNumber)
           if (cancelled) return
           const viewport = page.getViewport({ scale: 1 })
           sizes.push({ width: viewport.width, height: viewport.height })
-          // Release each page's cached resources as soon as it is measured,
-          // rather than leaving N instantiated page objects resident.
-          // (Measured: skipping the per-page measurement entirely does not
-          // reduce peak memory, so this loop is not the expensive part - but
-          // holding the pages afterwards is still pure waste.)
           page.cleanup()
         }
         if (cancelled) return
@@ -135,32 +141,20 @@ export default function PdfViewer({
 
     return () => {
       cancelled = true
-      // Order matters: abort the transport first so any chunk replies still
-      // in flight are discarded rather than pushed into a worker that is
-      // being torn down. abort() also closes the main-process file handle.
       transport?.abort()
       void task?.destroy()
     }
-    // onDocumentLoaded deliberately excluded: it is a callback identity, not
-    // an input to loading, and including it would reload the document on
-    // every parent render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fileId])
 
-  // ---- container measurement (debounced) -----------------------------
+  // ---- container measurement ----------------------------------------
   useLayoutEffect(() => {
     const element = scrollRef.current
     if (!element) return
-
-    const measure = (): void => {
-      setContainerSize({ width: element.clientWidth, height: element.clientHeight })
-    }
+    const measure = (): void => setContainerSize({ width: element.clientWidth, height: element.clientHeight })
     measure()
-
     let timer: number | undefined
     const observer = new ResizeObserver(() => {
-      // Debounced: a drag-resize fires continuously, and each change would
-      // otherwise re-render every visible page at a new scale.
       window.clearTimeout(timer)
       timer = window.setTimeout(measure, 120)
     })
@@ -169,43 +163,76 @@ export default function PdfViewer({
       window.clearTimeout(timer)
       observer.disconnect()
     }
-    // Depends on `status`: the scroll container is not in the DOM while the
-    // document is loading (the component early-returns a message instead), so
-    // a mount-only effect would find a null ref and never re-attach - leaving
-    // containerSize at 0 and the scale pinned to its fallback of 1.
   }, [status])
 
-  // ---- scale ---------------------------------------------------------
+  // ---- scale + layout ------------------------------------------------
   const referenceSize = basePageSizes[Math.min(currentPage, basePageSizes.length) - 1] ?? basePageSizes[0]
 
   const scale = useMemo(() => {
     if (zoomMode.kind === 'fixed') return zoomMode.scale
     if (!referenceSize || containerSize.width === 0) return 1
-    // Leave room for the scrollbar and the page's own margin.
     const availableWidth = Math.max(50, containerSize.width - 24)
     if (zoomMode.kind === 'fit-width') return availableWidth / referenceSize.width
     const availableHeight = Math.max(50, containerSize.height - 24)
     return Math.min(availableWidth / referenceSize.width, availableHeight / referenceSize.height)
   }, [zoomMode, referenceSize, containerSize])
 
-  // ---- layout --------------------------------------------------------
-  const layout = useMemo(() => {
-    let offset = 0
-    const pages = basePageSizes.map((size) => {
-      const width = size.width * scale
-      const height = size.height * scale
-      const top = offset
-      offset += height + PAGE_GAP
-      return { top, width, height }
-    })
-    return { pages, totalHeight: Math.max(0, offset - PAGE_GAP) }
-  }, [basePageSizes, scale])
+  // Pages are laid out with an explicit left offset rather than a CSS
+  // translate, so horizontal scrolling works when a page is wider than the
+  // viewport AND so cursor-anchored zoom can invert the mapping exactly.
+  const layout = useMemo(
+    () => computePageLayout(basePageSizes, scale, containerSize.width, PAGE_GAP),
+    [basePageSizes, scale, containerSize.width]
+  )
+
+  const layoutRef = useRef(layout)
+  layoutRef.current = layout
+  const scaleRef = useRef(scale)
+  scaleRef.current = scale
+
+  // ---- cursor-anchored zoom -----------------------------------------
+  // Captured before the scale changes, applied against the layout recomputed
+  // after it. See pdf/zoomAnchor.ts for why the anchor is an unscaled in-page
+  // offset rather than a content-space pixel offset.
+  const pendingAnchor = useRef<ZoomAnchor | undefined>(undefined)
+
+  const applyZoom = useCallback((nextScale: number, clientX: number, clientY: number) => {
+    const element = scrollRef.current
+    if (!element) return
+    const clamped = Math.max(MIN_SCALE, Math.min(MAX_SCALE, nextScale))
+    if (Math.abs(clamped - scaleRef.current) < 1e-9) return
+
+    const rect = element.getBoundingClientRect()
+    const anchor = captureZoomAnchor(
+      layoutRef.current,
+      scaleRef.current,
+      element.scrollLeft,
+      element.scrollTop,
+      clientX - rect.left,
+      clientY - rect.top
+    )
+    if (!anchor) return
+    pendingAnchor.current = anchor
+    setZoomMode({ kind: 'fixed', scale: clamped })
+  }, [])
+
+  useLayoutEffect(() => {
+    const anchor = pendingAnchor.current
+    const element = scrollRef.current
+    if (!anchor || !element) return
+    pendingAnchor.current = undefined
+    const next = applyZoomAnchor(layout, scale, anchor)
+    if (!next) return
+    element.scrollLeft = next.scrollLeft
+    element.scrollTop = next.scrollTop
+    // Read back rather than trusting the write: the browser clamps to the
+    // scrollable range, so at the edges the applied offset is not the
+    // requested one and the virtualized range must follow what actually took.
+    setScrollTop(element.scrollTop)
+  }, [layout, scale])
 
   // ---- visible range -------------------------------------------------
   const visibleRange = useMemo(() => {
-    // Background tab: mount nothing. PdfPageCanvas's unmount cancels its
-    // render task and calls page.cleanup(), which is what actually frees the
-    // memory - the document itself stays loaded for an instant switch back.
     if (!active) return { start: 1, end: 0 }
     if (layout.pages.length === 0) return { start: 1, end: 0 }
     const viewTop = scrollTop
@@ -213,14 +240,12 @@ export default function PdfViewer({
     let start = layout.pages.length
     let end = 1
     layout.pages.forEach((page, index) => {
-      const pageBottom = page.top + page.height
-      if (pageBottom >= viewTop && page.top <= viewBottom) {
+      if (page.top + page.height >= viewTop && page.top <= viewBottom) {
         start = Math.min(start, index + 1)
         end = Math.max(end, index + 1)
       }
     })
     if (start > end) {
-      // Scrolled into a gap between pages.
       start = Math.min(layout.pages.length, Math.max(1, currentPage))
       end = start
     }
@@ -230,21 +255,6 @@ export default function PdfViewer({
     }
   }, [active, layout, scrollTop, containerSize.height, currentPage])
 
-  // Coming back to the foreground: the scroll container was display:none, and
-  // browsers do not reliably preserve scrollTop across that, so restore the
-  // position this tab was left at.
-  useEffect(() => {
-    if (!active) return
-    const element = scrollRef.current
-    if (!element || element.scrollTop === scrollTop) return
-    element.scrollTop = scrollTop
-    // Only on activation - during normal scrolling the DOM is the source of
-    // truth and writing back would fight the user.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active])
-
-  // Track which page is "current" for the page indicator: the one covering
-  // the vertical middle of the viewport.
   useEffect(() => {
     if (layout.pages.length === 0) return
     const focusLine = scrollTop + (containerSize.height || 0) / 2
@@ -257,37 +267,176 @@ export default function PdfViewer({
 
   const handleScroll = useCallback(() => {
     const element = scrollRef.current
-    if (!element) return
-    setScrollTop(element.scrollTop)
+    if (element) setScrollTop(element.scrollTop)
   }, [])
+
+  useEffect(() => {
+    if (!active) return
+    const element = scrollRef.current
+    if (!element || element.scrollTop === scrollTop) return
+    element.scrollTop = scrollTop
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active])
 
   const scrollToPage = useCallback(
     (pageNumber: number) => {
       const element = scrollRef.current
       const target = layout.pages[pageNumber - 1]
-      if (!element || !target) return
-      element.scrollTo({ top: target.top })
+      if (element && target) element.scrollTo({ top: target.top })
     },
     [layout]
   )
 
-  const pageCount = basePageSizes.length
+  // ---- wheel: scroll, or ctrl+wheel to zoom at the cursor -------------
+  useEffect(() => {
+    const element = scrollRef.current
+    if (!element) return
+    const onWheel = (event: WheelEvent): void => {
+      if (!event.ctrlKey) return // plain wheel keeps the container's native scroll
+      event.preventDefault()
+      const factor = Math.exp(-event.deltaY / 400)
+      applyZoom(scaleRef.current * factor, event.clientX, event.clientY)
+    }
+    // Not passive: zooming must be able to preventDefault the page zoom.
+    element.addEventListener('wheel', onWheel, { passive: false })
+    return () => element.removeEventListener('wheel', onWheel)
+  }, [applyZoom, status])
 
-  const changeZoom = useCallback(
+  // ---- drag gestures: pan, marquee, click-vs-drag --------------------
+  const gesture = useRef<
+    | {
+        pointerId: number
+        button: number
+        behavior: 'pan' | 'marquee'
+        startClientX: number
+        startClientY: number
+        startScrollLeft: number
+        startScrollTop: number
+        startedAt: number
+        moved: boolean
+        additive: boolean
+      }
+    | undefined
+  >(undefined)
+  const suppressContextMenu = useRef(false)
+
+  function handlePointerDown(event: React.PointerEvent<HTMLDivElement>): void {
+    const element = scrollRef.current
+    if (!element) return
+    // 'none' is the drawing-tool left button: those clicks are delivered by
+    // the page canvas as point placements, not handled as a drag here.
+    const behavior = behaviorForButton(event.button, interaction)
+    if (behavior === 'none') return
+
+    gesture.current = {
+      pointerId: event.pointerId,
+      button: event.button,
+      behavior,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      startScrollLeft: element.scrollLeft,
+      startScrollTop: element.scrollTop,
+      startedAt: Date.now(),
+      moved: false,
+      additive: event.shiftKey || event.ctrlKey
+    }
+    element.setPointerCapture(event.pointerId)
+  }
+
+  function handlePointerMove(event: React.PointerEvent<HTMLDivElement>): void {
+    const g = gesture.current
+    const element = scrollRef.current
+    if (!g || !element || event.pointerId !== g.pointerId) return
+
+    const dx = event.clientX - g.startClientX
+    const dy = event.clientY - g.startClientY
+    if (!g.moved && Math.hypot(dx, dy) < DRAG_THRESHOLD_PX) return
+    if (!g.moved) {
+      g.moved = true
+      // Only once, at the threshold crossing: a pan re-renders on every move
+      // anyway, and flipping this per-move would add a second state write.
+      // A click that never crosses the threshold never shows `grabbing`.
+      if (g.behavior === 'pan') setIsPanning(true)
+    }
+
+    if (g.behavior === 'pan') {
+      // Drive the scroll container itself, so panning and the virtualized
+      // scroll are the same mechanism rather than two competing ones.
+      element.scrollLeft = g.startScrollLeft - dx
+      element.scrollTop = g.startScrollTop - dy
+      setScrollTop(element.scrollTop)
+      return
+    }
+
+    const rect = element.getBoundingClientRect()
+    const x0 = g.startClientX - rect.left
+    const y0 = g.startClientY - rect.top
+    const x1 = event.clientX - rect.left
+    const y1 = event.clientY - rect.top
+    setMarqueeScreenRect({
+      left: Math.min(x0, x1),
+      top: Math.min(y0, y1),
+      width: Math.abs(x1 - x0),
+      height: Math.abs(y1 - y0)
+    })
+  }
+
+  function finishGesture(event: React.PointerEvent<HTMLDivElement>): void {
+    const g = gesture.current
+    const element = scrollRef.current
+    if (!g || !element || event.pointerId !== g.pointerId) return
+    gesture.current = undefined
+    setIsPanning(false)
+    element.releasePointerCapture?.(event.pointerId)
+    setMarqueeScreenRect(undefined)
+
+    const shortEnough = Date.now() - g.startedAt <= CLICK_MAX_MS
+    if (!g.moved && shortEnough && g.button === 2) {
+      onContextMenu?.(event.clientX, event.clientY)
+      return
+    }
+    if (g.moved) suppressContextMenu.current = true
+    if (!g.moved || g.behavior !== 'marquee') return
+
+    // Convert the screen rect into each visible page's OWN user-space using
+    // that page's live viewport - the conversion stays on the coordinate
+    // boundary and a marquee spanning pages is handled per page.
+    const selections: PageRectSelection[] = []
+    for (const [pageNumber, context] of pageContexts.current) {
+      const canvasRect = context.canvas.getBoundingClientRect()
+      const overlapsX = Math.min(g.startClientX, event.clientX) <= canvasRect.right && Math.max(g.startClientX, event.clientX) >= canvasRect.left
+      const overlapsY = Math.min(g.startClientY, event.clientY) <= canvasRect.bottom && Math.max(g.startClientY, event.clientY) >= canvasRect.top
+      if (!overlapsX || !overlapsY) continue
+      const a = canvasToPdfPoint(context.viewport, g.startClientX - canvasRect.left, g.startClientY - canvasRect.top)
+      const b = canvasToPdfPoint(context.viewport, event.clientX - canvasRect.left, event.clientY - canvasRect.top)
+      selections.push({ pageNumber, rect: rectFromCorners(a, b) })
+    }
+    onMarqueeComplete?.(selections, g.additive)
+  }
+
+  const registerPage = useCallback((pageNumber: number, context: PageOverlayContext | undefined) => {
+    if (context) pageContexts.current.set(pageNumber, context)
+    else pageContexts.current.delete(pageNumber)
+  }, [])
+
+  const changeZoomStep = useCallback(
     (direction: 1 | -1) => {
-      const current = scale
+      const element = scrollRef.current
       const next =
         direction === 1
-          ? ZOOM_STEPS.find((step) => step > current + 1e-6)
-          : [...ZOOM_STEPS].reverse().find((step) => step < current - 1e-6)
-      if (next) setZoomMode({ kind: 'fixed', scale: next })
+          ? ZOOM_STEPS.find((s) => s > scale + 1e-6)
+          : [...ZOOM_STEPS].reverse().find((s) => s < scale - 1e-6)
+      if (!next) return
+      // Buttons zoom about the viewport centre; the wheel zooms at the cursor.
+      const rect = element?.getBoundingClientRect()
+      applyZoom(next, (rect?.left ?? 0) + (rect?.width ?? 0) / 2, (rect?.top ?? 0) + (rect?.height ?? 0) / 2)
     },
-    [scale]
+    [scale, applyZoom]
   )
 
-  if (status === 'loading') {
-    return <div className="pdf-viewer__message">Loading PDF…</div>
-  }
+  const pageCount = basePageSizes.length
+
+  if (status === 'loading') return <div className="pdf-viewer__message">Loading PDF…</div>
   if (status === 'error') {
     return (
       <div className="pdf-viewer__message pdf-viewer__message--error">
@@ -296,9 +445,9 @@ export default function PdfViewer({
       </div>
     )
   }
-  if (status === 'empty') {
-    return <div className="pdf-viewer__message">This PDF has no pages.</div>
-  }
+  if (status === 'empty') return <div className="pdf-viewer__message">This PDF has no pages.</div>
+
+
 
   return (
     <div className="pdf-viewer">
@@ -309,53 +458,57 @@ export default function PdfViewer({
         <span className="pdf-viewer__page-indicator">
           Page {currentPage} of {pageCount}
         </span>
-        <button
-          onClick={() => scrollToPage(currentPage + 1)}
-          disabled={currentPage >= pageCount}
-          title="Next page"
-        >
+        <button onClick={() => scrollToPage(currentPage + 1)} disabled={currentPage >= pageCount} title="Next page">
           ▶
         </button>
-
         <span className="pdf-viewer__separator" />
-
-        <button onClick={() => changeZoom(-1)} title="Zoom out">
+        <button onClick={() => changeZoomStep(-1)} title="Zoom out">
           −
         </button>
         <span className="pdf-viewer__zoom-indicator">{Math.round(scale * 100)}%</span>
-        <button onClick={() => changeZoom(1)} title="Zoom in">
+        <button onClick={() => changeZoomStep(1)} title="Zoom in">
           +
         </button>
-        <button
-          className={zoomMode.kind === 'fit-width' ? 'active' : ''}
-          onClick={() => setZoomMode({ kind: 'fit-width' })}
-        >
+        <button className={zoomMode.kind === 'fit-width' ? 'active' : ''} onClick={() => setZoomMode({ kind: 'fit-width' })}>
           Fit width
         </button>
-        <button
-          className={zoomMode.kind === 'fit-page' ? 'active' : ''}
-          onClick={() => setZoomMode({ kind: 'fit-page' })}
-        >
+        <button className={zoomMode.kind === 'fit-page' ? 'active' : ''} onClick={() => setZoomMode({ kind: 'fit-page' })}>
           Fit page
         </button>
-
         {toolbarExtras}
       </div>
 
-      <div className="pdf-viewer__scroll" ref={scrollRef} onScroll={handleScroll}>
-        <div className="pdf-viewer__canvas-area" style={{ height: layout.totalHeight }}>
+      {paletteSlot}
+
+      {/* Wrapper is the positioning context for the marquee, which must sit
+          over the viewport and NOT scroll with the content. */}
+      <div className="pdf-viewer__viewport">
+      <div
+        className="pdf-viewer__scroll"
+        ref={scrollRef}
+        onScroll={handleScroll}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={finishGesture}
+        onPointerCancel={finishGesture}
+        onContextMenu={(e) => {
+          // A drag that happened to use the right button must not also raise
+          // the browser menu on release.
+          e.preventDefault()
+          if (suppressContextMenu.current) suppressContextMenu.current = false
+        }}
+        style={{ cursor: isPanning ? 'grabbing' : interaction.cursor }}
+      >
+        <div className="pdf-viewer__canvas-area" style={{ height: layout.totalHeight, width: layout.contentWidth }}>
           {doc &&
             layout.pages.map((page, index) => {
               const pageNumber = index + 1
-              // Virtualization: only pages inside the visible window are
-              // mounted. Unmounting cancels their render task and releases
-              // the canvas (see PdfPageCanvas).
               if (pageNumber < visibleRange.start || pageNumber > visibleRange.end) return null
               return (
                 <div
                   key={pageNumber}
                   className="pdf-viewer__page-slot"
-                  style={{ top: page.top, width: page.width, height: page.height }}
+                  style={{ top: page.top, left: page.left, width: page.width, height: page.height }}
                 >
                   <PdfPageCanvas
                     doc={doc}
@@ -366,12 +519,26 @@ export default function PdfViewer({
                     height={page.height}
                     renderOverlay={renderOverlay}
                     onPointerDown={onPagePointerDown}
+                    onViewportReady={registerPage}
                     overlayRevision={overlayRevision}
                   />
                 </div>
               )
             })}
         </div>
+      </div>
+
+      {marqueeScreenRect ? (
+        <div
+          className="pdf-viewer__marquee"
+          style={{
+            left: marqueeScreenRect.left,
+            top: marqueeScreenRect.top,
+            width: marqueeScreenRect.width,
+            height: marqueeScreenRect.height
+          }}
+        />
+      ) : null}
       </div>
     </div>
   )

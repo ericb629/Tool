@@ -18,6 +18,12 @@ interface PdfPageCanvasProps {
   renderOverlay?: (ctx: CanvasRenderingContext2D, context: PageOverlayContext) => void
   onPointerDown?: (event: React.PointerEvent<HTMLCanvasElement>, context: PageOverlayContext) => void
   /**
+   * Publishes this page's live viewport to the viewer, so gestures that span
+   * pages (marquee) can convert screen coordinates into THIS page's
+   * user-space using the real transform rather than re-deriving one.
+   */
+  onViewportReady?: (pageNumber: number, context: PageOverlayContext | undefined) => void
+  /**
    * Changed by the parent to force an overlay repaint without re-rendering
    * the PDF bitmap. Any value works as long as it differs when the overlay
    * content should change.
@@ -46,6 +52,7 @@ export default function PdfPageCanvas({
   height,
   renderOverlay,
   onPointerDown,
+  onViewportReady,
   overlayRevision = 0
 }: PdfPageCanvasProps) {
   const pdfCanvasRef = useRef<HTMLCanvasElement>(null)
@@ -124,6 +131,14 @@ export default function PdfPageCanvas({
     renderOverlay?.(ctx, { pageNumber, viewport, canvas: overlay })
     ctx.restore()
   }, [viewport, renderOverlay, pageNumber, overlayRevision])
+
+  // Publish/withdraw this page's viewport for cross-page gestures.
+  useEffect(() => {
+    const overlay = overlayCanvasRef.current
+    if (!onViewportReady) return
+    onViewportReady(pageNumber, viewport && overlay ? { pageNumber, viewport, canvas: overlay } : undefined)
+    return () => onViewportReady(pageNumber, undefined)
+  }, [onViewportReady, pageNumber, viewport])
 
   return (
     <div className="pdf-page" style={{ width, height }} data-page-number={pageNumber}>

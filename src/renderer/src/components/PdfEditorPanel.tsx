@@ -1,7 +1,12 @@
-import { useCallback, useMemo, useState } from 'react'
-import PdfViewer from './PdfViewer'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import PdfViewer, { type PageRectSelection } from './PdfViewer'
+import { resolveInteraction, type InteractionMode } from '../tools/interaction'
 import type { PageOverlayContext } from './PdfPageCanvas'
+import ToolPalette from './ToolPalette'
+import ContextMenu from './ContextMenu'
 import { pdfPointToCanvas, pointerEventToPdfPoint } from '../pdf/coordinates'
+import { geometryIntersectsRect, hitTestGeometry } from '../pdf/hitTest'
+import { TOOL_BY_ID, isDrawingTool, type ToolId } from '../tools/registry'
 import type {
   LinearUnit,
   MarkupObject,
@@ -13,15 +18,16 @@ import type {
 } from '../../../shared/manifest'
 
 const LINEAR_UNITS: LinearUnit[] = ['ft', 'in', 'm', 'cm', 'mm']
-
-type Mode = 'idle' | 'calibrate' | 'measure'
+/** Grab radius in SCREEN pixels; converted to user-space by dividing by scale. */
+const HIT_TOLERANCE_PX = 6
 
 interface PdfEditorPanelProps {
   fileId: Uuid
   manifest: PdfFileManifest
   layerId: Uuid
-  quantityResult: QuantityResult | undefined
   active?: boolean
+  /** Derives a quantity for a specific markup, on demand. */
+  quantityForMarkup: (markupId: Uuid) => QuantityResult | undefined
   onDocumentLoaded: (pageCount: number) => void
   onSaveCalibration: (calibration: PageCalibration) => void
   onSaveMarkup: (markup: MarkupObject) => void
@@ -38,55 +44,121 @@ export default function PdfEditorPanel({
   fileId,
   manifest,
   layerId,
-  quantityResult,
   active = true,
+  quantityForMarkup,
   onDocumentLoaded,
   onSaveCalibration,
   onSaveMarkup
 }: PdfEditorPanelProps) {
-  const [mode, setMode] = useState<Mode>('idle')
-  // Every in-progress point below is a PdfPoint. No pixel coordinate is ever
-  // held in state - it is converted at capture and converted back at draw.
-  const [activePage, setActivePage] = useState<number | undefined>(undefined)
-  const [calibratePoints, setCalibratePoints] = useState<PdfPoint[]>([])
-  const [measurePoints, setMeasurePoints] = useState<PdfPoint[]>([])
+  // Tool choice and selection are per-tab session state: this component stays
+  // mounted per tab, so its state is per-tab for free.
+  const [activeToolId, setActiveToolId] = useState<ToolId>('select')
+  const [interactionMode, setInteractionMode] = useState<InteractionMode>('mouse')
+  const [selectedIds, setSelectedIds] = useState<Uuid[]>([])
+
+  // In-progress draw. Points are PdfPoints - no pixel ever enters state.
+  const [drawPage, setDrawPage] = useState<number | undefined>(undefined)
+  const [drawPoints, setDrawPoints] = useState<PdfPoint[]>([])
   const [realDistance, setRealDistance] = useState('')
   const [calibrationUnit, setCalibrationUnit] = useState<LinearUnit>('ft')
   const [measureUnit, setMeasureUnit] = useState<LinearUnit>('ft')
+  const [menu, setMenu] = useState<{ x: number; y: number } | undefined>(undefined)
 
-  const handlePointerDown = useCallback(
+  const tool = TOOL_BY_ID[activeToolId]
+  const drawing = isDrawingTool(tool)
+
+  const cancelDraw = useCallback(() => {
+    setDrawPoints([])
+    setDrawPage(undefined)
+    setRealDistance('')
+  }, [])
+
+  // Esc cancels an in-progress draw and returns to Select; with nothing in
+  // progress it clears the selection.
+  useEffect(() => {
+    if (!active) return
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') return
+      setMenu(undefined)
+      if (drawPoints.length > 0 || drawing) {
+        cancelDraw()
+        setActiveToolId('select')
+      } else {
+        setSelectedIds([])
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [active, drawing, drawPoints.length, cancelDraw])
+
+  function chooseTool(id: ToolId): void {
+    cancelDraw()
+    setActiveToolId(id)
+  }
+
+  // ---- pointer on a page ---------------------------------------------
+  const handlePagePointerDown = useCallback(
     (event: React.PointerEvent<HTMLCanvasElement>, context: PageOverlayContext) => {
-      if (mode === 'idle') return
-      // Conversion happens here, at the point of capture.
+      if (event.button !== 0) return
+      setMenu(undefined)
       const point = pointerEventToPdfPoint(context.viewport, context.canvas, event)
 
-      // Calibration and a measurement both belong to a single page; switching
-      // pages mid-draw would silently mix coordinate spaces.
-      if (activePage !== undefined && activePage !== context.pageNumber) return
-      setActivePage(context.pageNumber)
-
-      if (mode === 'calibrate') {
-        setCalibratePoints((prev) => (prev.length >= 2 ? [point] : [...prev, point]))
-      } else {
-        setMeasurePoints((prev) => [...prev, point])
+      if (drawing) {
+        // A draw belongs to one page; mixing pages would mix coordinate spaces.
+        if (drawPage !== undefined && drawPage !== context.pageNumber) return
+        setDrawPage(context.pageNumber)
+        setDrawPoints((prev) => {
+          const next = [...prev, point]
+          return tool.exactPoints && next.length > tool.exactPoints ? [point] : next
+        })
+        return
       }
+
+      // Select. Tolerance is screen-constant: divide by scale so a hairline is
+      // as clickable at 17% as at 400%.
+      const tolerance = HIT_TOLERANCE_PX / context.viewport.scale
+      const hit = manifest.markups
+        .filter((m) => m.pageNumber === context.pageNumber)
+        .find((m) => hitTestGeometry(m.geometry, point, tolerance))
+      const additive = event.shiftKey || event.ctrlKey
+      if (!hit) {
+        if (!additive) setSelectedIds([])
+        return
+      }
+      setSelectedIds((prev) =>
+        additive ? (prev.includes(hit.id) ? prev.filter((id) => id !== hit.id) : [...prev, hit.id]) : [hit.id]
+      )
     },
-    [mode, activePage]
+    [drawing, drawPage, tool, manifest]
   )
 
+  const handleMarquee = useCallback(
+    (selections: PageRectSelection[], additive: boolean) => {
+      const hits: Uuid[] = []
+      for (const { pageNumber, rect } of selections) {
+        for (const markup of manifest.markups) {
+          if (markup.pageNumber !== pageNumber) continue
+          if (geometryIntersectsRect(markup.geometry, rect)) hits.push(markup.id)
+        }
+      }
+      setSelectedIds((prev) => (additive ? Array.from(new Set([...prev, ...hits])) : hits))
+    },
+    [manifest]
+  )
+
+  // ---- overlay --------------------------------------------------------
   const renderOverlay = useCallback(
     (ctx: CanvasRenderingContext2D, context: PageOverlayContext) => {
       const { viewport, pageNumber } = context
 
-      const strokePath = (points: PdfPoint[], color: string, dashed = false): void => {
+      const stroke = (points: PdfPoint[], color: string, width: number, dashed = false): void => {
         if (points.length === 0) return
         ctx.save()
         ctx.strokeStyle = color
         ctx.fillStyle = color
-        ctx.lineWidth = 2
+        ctx.lineWidth = width
         if (dashed) ctx.setLineDash([6, 4])
         ctx.beginPath()
-        // Stored user-space -> pixels, freshly, at draw time only.
         const first = pdfPointToCanvas(viewport, points[0])
         ctx.moveTo(first.x, first.y)
         for (let i = 1; i < points.length; i++) {
@@ -103,98 +175,99 @@ export default function PdfEditorPanel({
         ctx.restore()
       }
 
-      const pageRecord = manifest.pages.find((p) => p.pageNumber === pageNumber)
-      if (pageRecord?.calibration) {
-        strokePath([pageRecord.calibration.pointA, pageRecord.calibration.pointB], '#2a9d8f')
-      }
+      const page = manifest.pages.find((p) => p.pageNumber === pageNumber)
+      if (page?.calibration) stroke([page.calibration.pointA, page.calibration.pointB], '#2a9d8f', 2)
 
       for (const markup of manifest.markups) {
         if (markup.pageNumber !== pageNumber || markup.geometry.kind !== 'polyline') continue
-        strokePath(markup.geometry.points, '#e63946')
+        const selected = selectedIds.includes(markup.id)
+        // Selected markups get a halo underneath, then the normal stroke.
+        if (selected) stroke(markup.geometry.points, '#4aa3ff', 8)
+        stroke(markup.geometry.points, selected ? '#ffffff' : '#e63946', 2)
       }
 
-      if (pageNumber === activePage) {
-        if (mode === 'calibrate') strokePath(calibratePoints, '#f4a261', true)
-        if (mode === 'measure') strokePath(measurePoints, '#e63946', true)
+      if (pageNumber === drawPage && drawPoints.length > 0) {
+        stroke(drawPoints, tool.isCalibration ? '#f4a261' : '#e63946', 2, true)
       }
     },
-    [manifest, mode, activePage, calibratePoints, measurePoints]
+    [manifest, selectedIds, drawPage, drawPoints, tool]
   )
 
-  // Any change that affects the overlay bumps this, so PdfPageCanvas repaints
-  // the overlay without re-rendering the page bitmap.
   const overlayRevision = useMemo(
-    () => `${manifest.updatedAt}|${mode}|${activePage}|${calibratePoints.length}|${measurePoints.length}`,
-    [manifest.updatedAt, mode, activePage, calibratePoints.length, measurePoints.length]
+    () => `${manifest.updatedAt}|${selectedIds.join(',')}|${drawPage}|${drawPoints.length}|${activeToolId}`,
+    [manifest.updatedAt, selectedIds, drawPage, drawPoints.length, activeToolId]
   )
 
-  function resetDrawing(): void {
-    setCalibratePoints([])
-    setMeasurePoints([])
-    setActivePage(undefined)
-    setMode('idle')
-  }
-
-  function saveCalibration(): void {
+  // ---- commit ---------------------------------------------------------
+  function commitCalibration(): void {
     const distance = Number.parseFloat(realDistance)
-    if (calibratePoints.length !== 2 || activePage === undefined) return
+    if (drawPoints.length !== 2 || drawPage === undefined) return
     if (!Number.isFinite(distance) || distance <= 0) return
     onSaveCalibration({
-      pageNumber: activePage,
-      pointA: calibratePoints[0],
-      pointB: calibratePoints[1],
+      pageNumber: drawPage,
+      pointA: drawPoints[0],
+      pointB: drawPoints[1],
       realDistance: distance,
       unit: calibrationUnit
     })
-    setRealDistance('')
-    resetDrawing()
+    cancelDraw()
+    setActiveToolId('select')
   }
 
-  function finishMeasure(): void {
-    if (measurePoints.length < 2 || activePage === undefined) return
+  function commitMarkup(): void {
+    if (!tool.produces || !tool.buildGeometry || !tool.buildTakeoff) return
+    if (drawPage === undefined || drawPoints.length < (tool.minPoints ?? 2)) return
     const now = new Date().toISOString()
     onSaveMarkup({
       id: crypto.randomUUID(),
-      pageNumber: activePage,
+      pageNumber: drawPage,
       layerId,
-      type: 'polyline',
-      takeoff: { mode: 'linear', unit: measureUnit },
-      geometry: { kind: 'polyline', points: measurePoints },
+      // The tool declares its type and takeoff; validateMarkup in the main
+      // process still checks the pairing, so a tool cannot smuggle in an
+      // illegal combination.
+      type: tool.produces.markupType,
+      takeoff: tool.buildTakeoff(measureUnit),
+      geometry: tool.buildGeometry(drawPoints),
       style: { color: '#e63946' },
       createdAt: now,
       updatedAt: now
     })
-    resetDrawing()
+    cancelDraw()
   }
 
-  const activePageHasCalibration =
-    activePage !== undefined && manifest.pages.some((p) => p.pageNumber === activePage && p.calibration)
-  const anyPageHasCalibration = manifest.pages.some((p) => p.calibration)
+  // ---- interaction arbitration ---------------------------------------
+  // See tools/interaction.ts for the right-drag rule.
+  const interaction = useMemo(() => resolveInteraction(tool, interactionMode), [tool, interactionMode])
+
+  const anyCalibration = manifest.pages.some((p) => p.calibration)
+  const selectedMarkup = selectedIds.length === 1 ? manifest.markups.find((m) => m.id === selectedIds[0]) : undefined
+  // Derived from the SELECTED markup, on demand - never from session state.
+  const selectedQuantity = selectedMarkup ? quantityForMarkup(selectedMarkup.id) : undefined
 
   const toolbarExtras = (
     <>
       <span className="pdf-viewer__separator" />
       <button
-        className={mode === 'calibrate' ? 'active' : ''}
-        onClick={() => {
-          resetDrawing()
-          setMode((m) => (m === 'calibrate' ? 'idle' : 'calibrate'))
-        }}
+        className={interactionMode === 'mouse' ? 'active' : ''}
+        onClick={() => setInteractionMode('mouse')}
+        title="Mouse mode: left-drag pans, right-drag marquees"
       >
-        Calibrate
+        Mouse
       </button>
       <button
-        className={mode === 'measure' ? 'active' : ''}
-        disabled={!anyPageHasCalibration}
-        title={anyPageHasCalibration ? 'Draw a linear markup' : 'Calibrate a page first'}
-        onClick={() => {
-          resetDrawing()
-          setMode((m) => (m === 'measure' ? 'idle' : 'measure'))
-        }}
+        className={interactionMode === 'arrow' ? 'active' : ''}
+        onClick={() => setInteractionMode('arrow')}
+        title="Arrow mode: left-click selects, left-drag marquees"
       >
-        Measure
+        Arrow
       </button>
-      <span className="pdf-viewer__quantity">Last: {formatQuantity(quantityResult)}</span>
+      <span className="pdf-viewer__quantity">
+        {selectedIds.length > 1
+          ? `${selectedIds.length} selected`
+          : selectedMarkup
+            ? `Selected: ${formatQuantity(selectedQuantity)}`
+            : 'Nothing selected'}
+      </span>
     </>
   )
 
@@ -203,66 +276,79 @@ export default function PdfEditorPanel({
       <PdfViewer
         fileId={fileId}
         active={active}
+        interaction={interaction}
         onDocumentLoaded={onDocumentLoaded}
         renderOverlay={renderOverlay}
-        onPagePointerDown={handlePointerDown}
+        onPagePointerDown={handlePagePointerDown}
+        onMarqueeComplete={handleMarquee}
+        onContextMenu={(x, y) => setMenu({ x, y })}
         overlayRevision={overlayRevision}
         toolbarExtras={toolbarExtras}
+        paletteSlot={
+          <ToolPalette
+            activeToolId={activeToolId}
+            onSelect={chooseTool}
+            disabledToolIds={anyCalibration ? [] : ['linear']}
+            disabledReason="Calibrate a page first"
+          />
+        }
       />
 
-      {mode === 'calibrate' && (
+      {drawing && (
         <div className="pdf-editor__prompt">
-          {calibratePoints.length < 2 ? (
-            <span>Click two points a known distance apart{activePage ? ` on page ${activePage}` : ''}.</span>
+          <span>{tool.hint}</span>
+          {tool.isCalibration ? (
+            drawPoints.length === 2 ? (
+              <>
+                <span>Distance on page {drawPage}:</span>
+                <input
+                  type="number"
+                  value={realDistance}
+                  onChange={(e) => setRealDistance(e.target.value)}
+                  placeholder="e.g. 100"
+                  autoFocus
+                />
+                <select value={calibrationUnit} onChange={(e) => setCalibrationUnit(e.target.value as LinearUnit)}>
+                  {LINEAR_UNITS.map((u) => (
+                    <option key={u} value={u}>
+                      {u}
+                    </option>
+                  ))}
+                </select>
+                <button onClick={commitCalibration} disabled={!Number.parseFloat(realDistance)}>
+                  Save calibration
+                </button>
+              </>
+            ) : (
+              <span>{drawPoints.length} of 2 points</span>
+            )
           ) : (
             <>
-              <span>Distance between the two points on page {activePage}:</span>
-              <input
-                type="number"
-                value={realDistance}
-                onChange={(e) => setRealDistance(e.target.value)}
-                placeholder="e.g. 100"
-                autoFocus
-              />
-              <select value={calibrationUnit} onChange={(e) => setCalibrationUnit(e.target.value as LinearUnit)}>
-                {LINEAR_UNITS.map((unit) => (
-                  <option key={unit} value={unit}>
-                    {unit}
+              <span>
+                {drawPoints.length} point(s){drawPage ? ` on page ${drawPage}` : ''}
+              </span>
+              {drawPage !== undefined && !manifest.pages.some((p) => p.pageNumber === drawPage && p.calibration) ? (
+                <span className="pdf-editor__prompt-warning">This page is not calibrated.</span>
+              ) : null}
+              <select value={measureUnit} onChange={(e) => setMeasureUnit(e.target.value as LinearUnit)}>
+                {LINEAR_UNITS.map((u) => (
+                  <option key={u} value={u}>
+                    {u}
                   </option>
                 ))}
               </select>
-              <button onClick={saveCalibration} disabled={!Number.parseFloat(realDistance)}>
-                Save calibration
+              <button onClick={commitMarkup} disabled={drawPoints.length < (tool.minPoints ?? 2)}>
+                Finish
               </button>
             </>
           )}
-          <button onClick={resetDrawing}>Cancel</button>
+          <button onClick={() => { cancelDraw(); setActiveToolId('select') }}>Cancel (Esc)</button>
         </div>
       )}
 
-      {mode === 'measure' && (
-        <div className="pdf-editor__prompt">
-          <span>
-            {measurePoints.length === 0
-              ? 'Click along the line to measure.'
-              : `${measurePoints.length} point(s) on page ${activePage}.`}
-          </span>
-          {activePage !== undefined && !activePageHasCalibration ? (
-            <span className="pdf-editor__prompt-warning">This page is not calibrated — the result will show as uncalibrated.</span>
-          ) : null}
-          <select value={measureUnit} onChange={(e) => setMeasureUnit(e.target.value as LinearUnit)}>
-            {LINEAR_UNITS.map((unit) => (
-              <option key={unit} value={unit}>
-                {unit}
-              </option>
-            ))}
-          </select>
-          <button onClick={finishMeasure} disabled={measurePoints.length < 2}>
-            Finish line
-          </button>
-          <button onClick={resetDrawing}>Cancel</button>
-        </div>
-      )}
+      {menu ? (
+        <ContextMenu x={menu.x} y={menu.y} selectionCount={selectedIds.length} onClose={() => setMenu(undefined)} />
+      ) : null}
     </div>
   )
 }

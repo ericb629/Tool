@@ -39,3 +39,14 @@ venv/
 # Real drawing sets dropped in the repo for testing - never commit these
 # (GitHub rejects files over 100MB, and these are working files, not source)
 *.pdf
+
+# Scratch projects created while testing the app by hand. The PDFs inside are
+# already ignored above, but their .manifest/*.json would otherwise be
+# committed - and they are throwaway working state, not source.
+#
+# Listed individually on purpose: git on Windows matches ignore patterns
+# case-insensitively, so a glob like /Test*/ also swallows the source `test/`
+# directory and silently drops the whole suite from the repo.
+/Test1/
+/Test2/
+/Test3/
