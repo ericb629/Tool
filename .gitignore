@@ -35,3 +35,7 @@ __pycache__/
 *.pyc
 venv/
 .venv/
+
+# Real drawing sets dropped in the repo for testing - never commit these
+# (GitHub rejects files over 100MB, and these are working files, not source)
+*.pdf
