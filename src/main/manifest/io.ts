@@ -24,7 +24,16 @@ export async function readJsonIfExists<T>(filePath: string): Promise<T | undefin
   }
 }
 
+/**
+ * Writes JSON atomically: the full content lands in a temp file first, then
+ * `rename` swaps it into place in one filesystem operation. This means a
+ * crash or power loss mid-write can never leave `filePath` truncated or
+ * containing partial JSON - the reader always sees either the old complete
+ * file or the new complete file, never something in between.
+ */
 export async function writeJson(filePath: string, data: unknown): Promise<void> {
   await fs.mkdir(dirname(filePath), { recursive: true })
-  await fs.writeFile(filePath, JSON.stringify(data, null, 2), 'utf-8')
+  const tmpPath = `${filePath}.tmp-${process.pid}-${Date.now()}`
+  await fs.writeFile(tmpPath, JSON.stringify(data, null, 2), 'utf-8')
+  await fs.rename(tmpPath, filePath)
 }

@@ -215,11 +215,36 @@ export interface LinkRecord {
 // ---------- Assembled in-memory project state (handed to renderer) ----------
 export type FileManifest = PdfFileManifest | SpreadsheetFileManifest
 
+/**
+ * Whether a thing referenced by the manifest was actually found on disk.
+ * Kept as two independent fields on ResolvedFileEntry rather than one
+ * combined enum: the source file and its sidecar go missing for different
+ * reasons and have different consequences, and a single enum forces one to
+ * mask the other when both are absent.
+ */
+export type PresenceStatus = 'ok' | 'missing'
+
 export interface ResolvedFileEntry {
   fileId: Uuid
   relativePath: string
   fileType: FileType
-  status: 'ok' | 'missing'
+  // Is the source document (the PDF/spreadsheet at relativePath) on disk?
+  // 'missing' means the file was moved, renamed, or deleted outside the app.
+  // Its markups are intact; there is just nothing to render them over.
+  sourceStatus: PresenceStatus
+  // Is this file's .manifest/<fileId>.json sidecar on disk? project.json is
+  // always the last file written on save (see ManifestStore.save), so a
+  // fileId it references should always have a sidecar. 'missing' therefore
+  // means something happened outside a normal save (manual deletion,
+  // restoring a partial backup, external corruption) and this file's markup
+  // history is likely LOST.
+  //
+  // `manifest` is still populated with an empty in-memory placeholder when
+  // this is 'missing', so callers always get a well-formed FileManifest -
+  // but an empty manifest here means "we don't know what was here", NOT
+  // "there was nothing here". Callers must check manifestStatus before
+  // presenting it as this file's real content.
+  manifestStatus: PresenceStatus
   manifest: FileManifest
 }
 

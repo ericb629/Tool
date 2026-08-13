@@ -1,4 +1,5 @@
 import type { ProjectState } from '../../../shared/manifest'
+import { describeFileStatus } from '../fileStatus'
 
 interface LiveLinkPanelProps {
   projectState: ProjectState | undefined
@@ -17,14 +18,19 @@ export default function LiveLinkPanel({ projectState }: LiveLinkPanelProps) {
     <ul className="live-link-list">
       {projectState.links.map((link) => {
         const sourceFile = projectState.files.find((f) => f.fileId === link.sourceFileId)
+        const notice = sourceFile ? describeFileStatus(sourceFile) : undefined
         return (
           <li key={link.id} className="live-link-list__item">
             <div className="live-link-list__source">
               {sourceFile ? sourceFile.relativePath : link.sourceFileId}
-              {sourceFile?.status === 'missing' ? ' (missing)' : ''}
               {' — markup '}
               {link.markupId.slice(0, 8)}
             </div>
+            {notice && notice.severity !== 'ok' ? (
+              <div className={`live-link-list__status live-link-list__status--${notice.severity}`} title={notice.detail}>
+                {notice.label}
+              </div>
+            ) : null}
             <div className="live-link-list__target">
               {'→ '}
               {link.target.sheetName} row {link.target.rowIndex}
