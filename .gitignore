@@ -17,10 +17,20 @@ desktop.ini
 *.key
 *.pem
 
-# Common build/dependency output (harmless if unused)
+# Dependencies
 node_modules/
+
+# electron-vite build output
+out/
+
+# electron-builder packaged output
+release/
+
+# TypeScript incremental build info
+*.tsbuildinfo
+
+# Common build/dependency output (harmless if unused)
 dist/
-build/
 __pycache__/
 *.pyc
 venv/
