@@ -304,36 +304,137 @@ describe('arc mode', () => {
     )
   })
 
-  // ---- KNOWN DEFECT ----
-  // An arc that crosses 0 / 2*PI with angles normalized to [0, 2*PI) - which
-  // is what any tool built on Math.atan2 + normalization will produce.
-  // 330deg -> 30deg is a 60deg sweep, but the implementation computes
-  // abs(end - start) = 300deg and reports an arc five times too long.
-  // it.fails asserts this is CURRENTLY broken: it will start failing (loudly)
-  // the moment the sweep calculation is fixed, which is the point.
-  it.fails('KNOWN DEFECT: arc crossing the 0/360 boundary measures the wrong sweep', () => {
-    const start = (11 * Math.PI) / 6 // 330 deg
-    const end = Math.PI / 6 //  30 deg
-    const correctSweep = Math.PI / 3 // 60 deg
-    close(ok(deriveQuantity(markup('arc', arc(start, end), linear('ft')), FT)).value, 10 * correctSweep, 1e-9)
+  // ---- arcs that wrap past 0 ----
+  // Stored per the schema invariant: endAngle >= startAngle, so 330 -> 30
+  // degrees is written as 330 -> 390. Deriving the sweep as
+  // abs(end - start) instead reported the 300-degree complement - five times
+  // too long, with no error raised.
+  const WRAP_START = (11 * Math.PI) / 6 // 330 deg
+  const WRAP_END = (13 * Math.PI) / 6 // 390 deg == 30 deg, stored wrapped
+  const WRAP_SWEEP = Math.PI / 3 // 60 deg
+
+  it('an arc wrapping past 0 measures the 60 degree sweep, not its complement', () => {
+    const value = ok(deriveQuantity(markup('arc', arc(WRAP_START, WRAP_END), linear('ft')), FT)).value
+    close(value, 10 * WRAP_SWEEP, 1e-9)
+    // Guard against a regression to abs()/complement, which would be 5x.
+    assert.ok(value < 10 * WRAP_SWEEP * 1.5, `expected a 60deg arc, got ${(value / (10 * WRAP_SWEEP)).toFixed(1)}x it`)
   })
 
-  it('documents what the 0/360-crossing arc returns TODAY, so the error is measurable', () => {
-    const start = (11 * Math.PI) / 6
-    const end = Math.PI / 6
-    const actual = ok(deriveQuantity(markup('arc', arc(start, end), linear('ft')), FT)).value
-    const correct = 10 * (Math.PI / 3)
-    close(actual, 10 * ((5 * Math.PI) / 3), 1e-9) // the complement, not the arc
-    assert.ok(actual > correct * 4, `overstates a 60deg arc by ${(actual / correct).toFixed(1)}x`)
+  it('the same wrapping arc gives the 60 degree sector area', () => {
+    close(ok(deriveQuantity(markup('arc', arc(WRAP_START, WRAP_END), area('sf')), FT)).value, 0.5 * 100 * WRAP_SWEEP, 1e-9)
   })
 
-  it.fails('KNOWN DEFECT: the same wraparound overstates sector AREA', () => {
-    const start = (11 * Math.PI) / 6
-    const end = Math.PI / 6
-    close(
-      ok(deriveQuantity(markup('arc', arc(start, end), area('sf')), FT)).value,
-      0.5 * 100 * (Math.PI / 3),
-      1e-9
+  it('a wrapping arc equals the same sweep written without wrapping', () => {
+    // 330 -> 390 and 0 -> 60 are the same arc length; only the placement differs.
+    const wrapped = ok(deriveQuantity(markup('arc', arc(WRAP_START, WRAP_END), linear('ft')), FT)).value
+    const plain = ok(deriveQuantity(markup('arc', arc(0, Math.PI / 3), linear('ft')), FT)).value
+    close(wrapped, plain, 1e-9)
+  })
+
+  // The case the obvious mod-2*PI fix would have silently broken: a full
+  // circle is stored as 0 -> 2*PI, and (end - start) mod 2*PI is zero.
+  it('a full circle survives the wrap handling: length 2*pi*r, not zero', () => {
+    const value = ok(deriveQuantity(markup('arc', arc(0, 2 * Math.PI), linear('ft')), FT)).value
+    close(value, 2 * Math.PI * 10)
+    assert.ok(value > 0, 'a full circle must not collapse to zero length')
+  })
+
+  it('a full circle survives the wrap handling: area pi*r^2, not zero', () => {
+    const value = ok(deriveQuantity(markup('arc', arc(0, 2 * Math.PI), area('sf')), FT)).value
+    close(value, Math.PI * 100)
+    assert.ok(value > 0, 'a full circle must not collapse to zero area')
+  })
+
+  it('a full circle placed anywhere on the dial still measures a full turn', () => {
+    // Starting at 330 deg and sweeping a full turn ends at 330 + 360.
+    const value = ok(
+      deriveQuantity(markup('arc', arc(WRAP_START, WRAP_START + 2 * Math.PI), linear('ft')), FT)
+    ).value
+    close(value, 2 * Math.PI * 10, 1e-9)
+  })
+
+  it('a degenerate arc (startAngle === endAngle) is zero, not a full circle', () => {
+    close(ok(deriveQuantity(markup('arc', arc(Math.PI, Math.PI), linear('ft')), FT)).value, 0)
+  })
+})
+
+describe('arc sweep invariant', () => {
+  const arcGeom = (startAngle: number, endAngle: number): MarkupGeometry => ({
+    kind: 'arc',
+    center: { x: 0, y: 0 },
+    radius: 10,
+    startAngle,
+    endAngle
+  })
+
+  it('rejects endAngle < startAngle so the ambiguous shape never reaches disk', () => {
+    const result = validateMarkup({
+      type: 'arc',
+      takeoff: linear('ft'),
+      geometry: arcGeom((11 * Math.PI) / 6, Math.PI / 6)
+    })
+    assert.equal(result.valid, false)
+    if (!result.valid) {
+      assert.match(result.reason, /endAngle/)
+      assert.match(result.reason, /startAngle/)
+    }
+  })
+
+  it('explains how to store a wrapping arc', () => {
+    const result = validateMarkup({
+      type: 'arc',
+      takeoff: linear('ft'),
+      geometry: arcGeom(1, 0)
+    })
+    assert.equal(result.valid, false)
+    // The message has to tell a tool author what to do, not just say no.
+    if (!result.valid) assert.match(result.reason, /2\*PI|390/)
+  })
+
+  it('accepts the wrapped form, an ordinary arc, a full circle and a degenerate arc', () => {
+    for (const [start, end] of [
+      [(11 * Math.PI) / 6, (13 * Math.PI) / 6],
+      [0, Math.PI / 2],
+      [0, 2 * Math.PI],
+      [Math.PI, Math.PI]
+    ]) {
+      const result = validateMarkup({ type: 'arc', takeoff: linear('ft'), geometry: arcGeom(start, end) })
+      assert.equal(result.valid, true, `rejected a legal arc ${start} -> ${end}: ${JSON.stringify(result)}`)
+    }
+  })
+
+  it('applies to area and volume arcs too, not only linear', () => {
+    const bad = arcGeom(1, 0)
+    assert.equal(validateMarkup({ type: 'arc', takeoff: area('sf'), geometry: bad }).valid, false)
+    assert.equal(validateMarkup({ type: 'arc', takeoff: volume('cf', 1, 'ft'), geometry: bad }).valid, false)
+  })
+
+  // Defence in depth. validateMarkup keeps an inverted arc off disk, but
+  // deriveQuantity can still be handed one - a hand-edited manifest, a
+  // restored backup, or any future path that forgets to validate. Deriving
+  // the sweep by subtraction makes that produce a visibly impossible
+  // negative number; abs() would instead produce the 300-degree complement,
+  // a plausible positive quantity five times too large. A wrong number that
+  // looks wrong is recoverable; one that looks right is not.
+  it('an inverted arc that bypassed validation derives negative, not a plausible complement', () => {
+    const inverted = markup('arc', arcGeom((11 * Math.PI) / 6, Math.PI / 6), linear('ft'))
+    const value = ok(deriveQuantity(inverted, FT)).value
+    assert.ok(value < 0, `expected an obviously-invalid negative length, got ${value}`)
+    // Specifically must NOT be the complement (+52.36), which reads as real.
+    assert.ok(
+      Math.abs(value - 10 * ((5 * Math.PI) / 3)) > 1e-6,
+      'derivation returned the plausible-looking complement instead of an evidently broken value'
+    )
+  })
+
+  it('does not constrain angles on non-arc geometry', () => {
+    assert.equal(
+      validateMarkup({
+        type: 'polyline',
+        takeoff: linear('ft'),
+        geometry: { kind: 'polyline', points: [{ x: 0, y: 0 }, { x: 1, y: 1 }] }
+      }).valid,
+      true
     )
   })
 })

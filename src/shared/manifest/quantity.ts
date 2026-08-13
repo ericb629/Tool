@@ -55,7 +55,12 @@ function geometryLength(geometry: MarkupGeometry): number {
       return total
     }
     case 'arc':
-      return geometry.radius * Math.abs(geometry.endAngle - geometry.startAngle)
+      // endAngle >= startAngle is a schema invariant (see MarkupGeometry and
+      // validateMarkup), so the sweep is a plain subtraction. Taking abs()
+      // here instead would report the 300-degree complement for an arc stored
+      // as 330 -> 390 degrees; reducing mod 2*PI would collapse a full circle
+      // to zero. Subtraction is correct for both.
+      return geometry.radius * (geometry.endAngle - geometry.startAngle)
     default:
       throw new Error(`Cannot derive a length from geometry kind '${geometry.kind}'`)
   }
@@ -77,8 +82,9 @@ function geometryArea(geometry: MarkupGeometry): number {
     }
     case 'arc':
       // Sector area; degrades to a full circle's area (pi * r^2) when
-      // deltaTheta === 2*PI with no special-casing needed.
-      return 0.5 * geometry.radius ** 2 * Math.abs(geometry.endAngle - geometry.startAngle)
+      // deltaTheta === 2*PI with no special-casing needed. Same invariant as
+      // geometryLength: endAngle >= startAngle, so the sweep is a subtraction.
+      return 0.5 * geometry.radius ** 2 * (geometry.endAngle - geometry.startAngle)
     default:
       throw new Error(`Cannot derive an area from geometry kind '${geometry.kind}'`)
   }

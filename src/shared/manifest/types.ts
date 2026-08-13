@@ -127,6 +127,24 @@ export type MarkupGeometry =
       // just reintroduces the numerical error this avoids by storing it
       // directly. Angles are radians, measured counterclockwise from the
       // positive x-axis, consistent with the y-up convention above.
+      //
+      // INVARIANT: endAngle >= startAngle, and the arc sweeps
+      // counterclockwise from one to the other. An arc that wraps past 0
+      // stores endAngle + 2*PI rather than a smaller value: an arc from 330
+      // to 30 degrees is stored as 330 -> 390, NOT 330 -> 30. Enforced by
+      // validateMarkup.
+      //
+      // This exists because the sweep is otherwise ambiguous. Deriving it as
+      // abs(endAngle - startAngle) reports the 300-degree complement for that
+      // arc - a quantity five times too large, with no error raised - while
+      // reducing mod 2*PI collapses a full circle (0 -> 2*PI) to zero length.
+      // With the invariant held, sweep is simply endAngle - startAngle and
+      // both cases fall out correctly, which is the no-special-casing
+      // property this representation was chosen for.
+      //
+      // A tool computing angles with Math.atan2 must therefore normalise:
+      // atan2 returns (-PI, PI], so an arc crossing the boundary needs 2*PI
+      // added to endAngle before it is stored.
       kind: 'arc'
       center: PdfPoint
       radius: number

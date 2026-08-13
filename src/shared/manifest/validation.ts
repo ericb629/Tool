@@ -50,5 +50,19 @@ export function validateMarkup(markup: Pick<MarkupObject, 'type' | 'takeoff' | '
     }
   }
 
+  // Arc sweep invariant. Without it, an arc wrapping past 0 stored as
+  // 330 -> 30 degrees derives as its 300-degree complement: a quantity five
+  // times too large that still looks like a plausible number. Rejecting it
+  // here keeps the bad shape off disk rather than leaving the derivation to
+  // guess which arc was meant. See MarkupGeometry for the full rationale.
+  if (markup.geometry.kind === 'arc' && markup.geometry.endAngle < markup.geometry.startAngle) {
+    return {
+      valid: false,
+      reason:
+        `Arc endAngle (${markup.geometry.endAngle}) must be >= startAngle (${markup.geometry.startAngle}). ` +
+        `An arc that wraps past 0 stores endAngle + 2*PI - e.g. 330 to 30 degrees is stored as 330 -> 390.`
+    }
+  }
+
   return { valid: true }
 }
