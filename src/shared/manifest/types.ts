@@ -128,10 +128,12 @@ export type MarkupGeometry =
       // directly. Angles are radians, measured counterclockwise from the
       // positive x-axis, consistent with the y-up convention above.
       //
-      // INVARIANT: endAngle >= startAngle, and the arc sweeps
-      // counterclockwise from one to the other. An arc that wraps past 0
-      // stores endAngle + 2*PI rather than a smaller value: an arc from 330
-      // to 30 degrees is stored as 330 -> 390, NOT 330 -> 30. Enforced by
+      // INVARIANT: startAngle <= endAngle <= startAngle + 2*PI, and the arc
+      // sweeps counterclockwise from one to the other. An arc that wraps past
+      // 0 stores endAngle + 2*PI rather than a smaller value: an arc from 330
+      // to 30 degrees is stored as 330 -> 390, NOT 330 -> 30. One full turn
+      // is the maximum sweep - a larger value would retrace the same
+      // geometry while multiplying the derived quantity. Enforced by
       // validateMarkup.
       //
       // This exists because the sweep is otherwise ambiguous. Deriving it as

@@ -427,6 +427,41 @@ describe('arc sweep invariant', () => {
     )
   })
 
+  it('accepts a sweep of exactly one full turn', () => {
+    assert.equal(validateMarkup({ type: 'arc', takeoff: linear('ft'), geometry: arcGeom(0, 2 * Math.PI) }).valid, true)
+    // And one full turn starting anywhere on the dial.
+    const start = (11 * Math.PI) / 6
+    assert.equal(
+      validateMarkup({ type: 'arc', takeoff: linear('ft'), geometry: arcGeom(start, start + 2 * Math.PI) }).valid,
+      true
+    )
+  })
+
+  it('rejects a sweep slightly over one full turn', () => {
+    const result = validateMarkup({
+      type: 'arc',
+      takeoff: linear('ft'),
+      geometry: arcGeom(0, 2 * Math.PI + 1e-6)
+    })
+    assert.equal(result.valid, false)
+    if (!result.valid) assert.match(result.reason, /full turn|2\*PI/)
+  })
+
+  it('rejects a multi-turn sweep', () => {
+    assert.equal(validateMarkup({ type: 'arc', takeoff: linear('ft'), geometry: arcGeom(0, 8 * Math.PI) }).valid, false)
+  })
+
+  it('still accepts the wrapping case (330 -> 390), whose sweep is under a turn', () => {
+    assert.equal(
+      validateMarkup({
+        type: 'arc',
+        takeoff: linear('ft'),
+        geometry: arcGeom((11 * Math.PI) / 6, (13 * Math.PI) / 6)
+      }).valid,
+      true
+    )
+  })
+
   it('does not constrain angles on non-arc geometry', () => {
     assert.equal(
       validateMarkup({
