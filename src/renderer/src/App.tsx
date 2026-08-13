@@ -1,9 +1,9 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Group, Panel, Separator } from 'react-resizable-panels'
 import LabeledPanel from './components/LabeledPanel'
 import LiveLinkPanel from './components/LiveLinkPanel'
 import PdfEditorPanel from './components/PdfEditorPanel'
-import SpreadsheetPanel from './components/SpreadsheetPanel'
+import SpreadsheetPanel, { TAKEOFF_ROW_INDEX, TAKEOFF_SHEET_NAME } from './components/SpreadsheetPanel'
 import { describeFileStatus } from './fileStatus'
 import { deriveQuantity, type LinkRecord, type MarkupObject, type PageCalibration, type ProjectState, type QuantityResult, type Uuid } from '../../shared/manifest'
 
@@ -147,19 +147,47 @@ export default function App() {
     spreadsheetFileEntry?.manifest.fileType === 'spreadsheet' ? spreadsheetFileEntry.manifest : undefined
   const layerId = projectState?.layers[0]?.id
 
-  // The one place deriveQuantity is actually called from the running app -
-  // recomputed from geometry + calibration on every render, never cached.
-  const quantityResult = useMemo<QuantityResult | undefined>(() => {
-    if (!pdfManifest || !lastMarkupId) return undefined
-    const markup = pdfManifest.markups.find((m) => m.id === lastMarkupId)
-    if (!markup) return undefined
-    const page = pdfManifest.pages.find((p) => p.pageNumber === markup.pageNumber) ?? {
-      pageNumber: markup.pageNumber
-    }
-    return deriveQuantity(markup, page)
-  }, [pdfManifest, lastMarkupId])
+  // Derives a markup's quantity from whichever PDF actually holds it.
+  // Recomputed from geometry + calibration on demand, never cached, so an
+  // edit to either can't leave a stale number behind.
+  const quantityFor = useCallback(
+    (sourceFileId: Uuid | undefined, markupId: Uuid | undefined): QuantityResult | undefined => {
+      if (!projectState || !sourceFileId || !markupId) return undefined
+      const entry = projectState.files.find((f) => f.fileId === sourceFileId)
+      if (!entry || entry.manifest.fileType !== 'pdf') return undefined
+      const markup = entry.manifest.markups.find((m) => m.id === markupId)
+      if (!markup) return undefined
+      const page = entry.manifest.pages.find((p) => p.pageNumber === markup.pageNumber) ?? {
+        pageNumber: markup.pageNumber
+      }
+      return deriveQuantity(markup, page)
+    },
+    [projectState]
+  )
 
-  const existingLinkForMarkup = projectState?.links.find((l) => l.markupId === lastMarkupId)
+  // Quantity of the markup just drawn - a preview for the toolbar only.
+  const lastDrawnQuantity = useMemo(
+    () => quantityFor(pdfFileId, lastMarkupId),
+    [quantityFor, pdfFileId, lastMarkupId]
+  )
+
+  const rowLink = projectState?.links.find(
+    (l) =>
+      l.target.fileId === spreadsheetFileId &&
+      l.target.sheetName === TAKEOFF_SHEET_NAME &&
+      l.target.rowIndex === TAKEOFF_ROW_INDEX
+  )
+
+  // The row's number must come from the markup the row is LINKED to, not
+  // from whatever happened to be drawn most recently. Those differ after a
+  // restart (nothing has been drawn yet) and any time a second markup is
+  // drawn after linking the first - in both cases the row would otherwise
+  // display a number that does not belong to it.
+  const rowQuantity = useMemo(
+    () => quantityFor(rowLink?.sourceFileId, rowLink?.markupId),
+    [quantityFor, rowLink]
+  )
+
 
   return (
     <Group orientation="horizontal" className="app-panel-group">
@@ -216,7 +244,7 @@ export default function App() {
                 fileId={pdfFileId}
                 manifest={pdfManifest}
                 layerId={layerId}
-                quantityResult={quantityResult}
+                quantityResult={lastDrawnQuantity}
                 onDocumentLoaded={(pageCount) => handleDocumentLoaded(pdfFileId, pageCount)}
                 onSaveCalibration={(calibration) => handleSaveCalibration(pdfFileId, calibration)}
                 onSaveMarkup={(markup) => handleSaveMarkup(pdfFileId, markup)}
@@ -247,10 +275,11 @@ export default function App() {
             <SpreadsheetPanel
               fileId={spreadsheetFileId}
               manifest={spreadsheetManifest}
-              quantityResult={quantityResult}
+              rowQuantity={rowQuantity}
+              lastDrawnQuantity={lastDrawnQuantity}
               lastMarkupId={lastMarkupId}
               pdfFileId={pdfFileId}
-              existingLinkForMarkup={existingLinkForMarkup}
+              isLinked={Boolean(rowLink)}
               onEnsureSheet={() => handleEnsureSheet(spreadsheetFileId)}
               onCreateLink={handleCreateLink}
             />

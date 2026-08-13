@@ -1,15 +1,23 @@
 import type { LinkRecord, QuantityResult, SpreadsheetFileManifest, Uuid } from '../../../shared/manifest'
 
-const SHEET_NAME = 'Takeoff'
-const ROW_INDEX = 0
+export const TAKEOFF_SHEET_NAME = 'Takeoff'
+export const TAKEOFF_ROW_INDEX = 0
 
 interface SpreadsheetPanelProps {
   fileId: Uuid
   manifest: SpreadsheetFileManifest
-  quantityResult: QuantityResult | undefined
+  /**
+   * Quantity of the markup this row is LINKED to. Undefined when the row has
+   * no link yet. Deliberately NOT the last-drawn markup's quantity: a row must
+   * never display a number belonging to something it is not linked to.
+   */
+  rowQuantity: QuantityResult | undefined
+  /** Preview of the markup just drawn, shown only while the row is unlinked. */
+  lastDrawnQuantity: QuantityResult | undefined
   lastMarkupId: Uuid | undefined
   pdfFileId: Uuid | undefined
-  existingLinkForMarkup: LinkRecord | undefined
+  /** Whether THIS ROW has a link, from persisted state - not session state. */
+  isLinked: boolean
   onEnsureSheet: () => void
   onCreateLink: (link: LinkRecord) => void
 }
@@ -29,20 +37,21 @@ function formatQuantity(result: QuantityResult | undefined): string {
 export default function SpreadsheetPanel({
   fileId,
   manifest,
-  quantityResult,
+  rowQuantity,
+  lastDrawnQuantity,
   lastMarkupId,
   pdfFileId,
-  existingLinkForMarkup,
+  isLinked,
   onEnsureSheet,
   onCreateLink
 }: SpreadsheetPanelProps) {
-  const sheet = manifest.sheets.find((s) => s.sheetName === SHEET_NAME)
+  const sheet = manifest.sheets.find((s) => s.sheetName === TAKEOFF_SHEET_NAME)
 
   if (!sheet) {
     return (
       <div className="spreadsheet-panel">
         <span className="labeled-panel__placeholder">No sheet yet</span>
-        <button onClick={onEnsureSheet}>Add "{SHEET_NAME}" sheet</button>
+        <button onClick={onEnsureSheet}>Add "{TAKEOFF_SHEET_NAME}" sheet</button>
       </div>
     )
   }
@@ -54,7 +63,7 @@ export default function SpreadsheetPanel({
       id: crypto.randomUUID(),
       markupId: lastMarkupId,
       sourceFileId: pdfFileId,
-      target: { fileId, sheetName: SHEET_NAME, rowIndex: ROW_INDEX },
+      target: { fileId, sheetName: TAKEOFF_SHEET_NAME, rowIndex: TAKEOFF_ROW_INDEX },
       createdAt: now,
       updatedAt: now
     }
@@ -74,11 +83,21 @@ export default function SpreadsheetPanel({
         </thead>
         <tbody>
           <tr>
-            <td>{SHEET_NAME}</td>
-            <td>{ROW_INDEX}</td>
-            <td>{formatQuantity(quantityResult) || '—'}</td>
+            <td>{TAKEOFF_SHEET_NAME}</td>
+            <td>{TAKEOFF_ROW_INDEX}</td>
             <td>
-              {existingLinkForMarkup ? (
+              {rowQuantity ? (
+                formatQuantity(rowQuantity)
+              ) : lastDrawnQuantity ? (
+                // Not this row's number yet - label it so a preview can never
+                // be mistaken for the linked quantity.
+                <span className="spreadsheet-panel__preview">{formatQuantity(lastDrawnQuantity)} (unlinked)</span>
+              ) : (
+                <span className="spreadsheet-panel__empty">not linked</span>
+              )}
+            </td>
+            <td>
+              {isLinked ? (
                 <span>Linked</span>
               ) : (
                 <button onClick={handleLink} disabled={!lastMarkupId}>
