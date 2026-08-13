@@ -203,3 +203,73 @@ describe('handle lifecycle', () => {
     await reader.closeDocument(fileId)
   })
 })
+
+/**
+ * Overlapping opens of the SAME document.
+ *
+ * React StrictMode double-invokes effects in dev, so the viewer opens a file,
+ * is torn down before its open resolves, and opens it again. The teardown of
+ * the first attempt must not close the document the second attempt is using -
+ * and because readRange answers a closed id with an EMPTY chunk (to keep
+ * genuine teardown quiet), getting this wrong does not raise: pdf.js simply
+ * waits for bytes that never arrive and the viewer says "Loading PDF..."
+ * forever. Only files larger than the initial chunk are affected, because a
+ * small one never range-requests at all.
+ */
+describe('overlapping opens', () => {
+  it('survives a stale opener closing while a live one is in use', async () => {
+    const { reader, fileId, contents } = await setup(500_000)
+
+    // Both effect invocations open before either resolves.
+    const [, second] = await Promise.all([reader.openDocument(fileId), reader.openDocument(fileId)])
+    assert.equal(second.length, contents.length)
+
+    // The first (cancelled) invocation now tears itself down.
+    await reader.closeDocument(fileId)
+
+    // The live document must still serve real bytes, not an empty chunk.
+    const begin = INITIAL_CHUNK_BYTES
+    const chunk = await reader.readRange(fileId, begin, begin + 1024)
+    assert.equal(chunk.length, 1024, 'live document served an empty chunk after a stale close')
+    assert.deepEqual(Buffer.from(chunk), contents.subarray(begin, begin + 1024))
+
+    await reader.closeDocument(fileId)
+    assert.equal(reader.openCount, 0, 'handle still held after the last close')
+  })
+
+  it('shares one handle across racing opens and closes it on the last release', async () => {
+    const { reader, fileId } = await setup(500_000)
+    await Promise.all([reader.openDocument(fileId), reader.openDocument(fileId), reader.openDocument(fileId)])
+    // One handle, three holders. Opening three times and storing each over the
+    // last would leave two handles that nothing can ever close.
+    assert.equal(reader.openCount, 1)
+    assert.equal(reader.refCountFor(fileId), 3)
+
+    await reader.closeDocument(fileId)
+    assert.equal(reader.openCount, 1, 'closed while other holders remained')
+    await reader.closeDocument(fileId)
+    assert.equal(reader.openCount, 1, 'closed while another holder remained')
+    await reader.closeDocument(fileId)
+    assert.equal(reader.openCount, 0, 'still held after the last release')
+  })
+
+  it('closeAll releases a document even with references outstanding', async () => {
+    const { reader, fileId } = await setup(500_000)
+    await reader.openDocument(fileId)
+    await reader.openDocument(fileId)
+    await reader.closeAll()
+    assert.equal(reader.openCount, 0)
+  })
+
+  it('reopening after a full close serves real bytes again', async () => {
+    const { reader, fileId, contents } = await setup(500_000)
+    await reader.openDocument(fileId)
+    await reader.closeDocument(fileId)
+    // A reopen must clear the "closed" marking, or every range request is
+    // answered with an empty chunk and the document silently never loads.
+    await reader.openDocument(fileId)
+    const chunk = await reader.readRange(fileId, INITIAL_CHUNK_BYTES, INITIAL_CHUNK_BYTES + 512)
+    assert.deepEqual(Buffer.from(chunk), contents.subarray(INITIAL_CHUNK_BYTES, INITIAL_CHUNK_BYTES + 512))
+    await reader.closeDocument(fileId)
+  })
+})

@@ -27,6 +27,21 @@ export const INITIAL_CHUNK_BYTES = 64 * 1024
 interface OpenDocument {
   handle: fsTypes.FileHandle
   length: number
+  /**
+   * How many callers currently hold this document open.
+   *
+   * The same file can legitimately be opened more than once at a time: React
+   * StrictMode double-invokes effects in dev, so the viewer opens a document,
+   * is torn down before the open resolves, and opens it again. Without a
+   * count, the first (cancelled) attempt's close tears down the handle the
+   * second attempt is actively using. That failure is silent and permanent -
+   * readRange answers a closed id with an empty chunk, so pdf.js waits for
+   * bytes that never arrive and the viewer shows "Loading PDF..." forever.
+   *
+   * Each openDocument is paired with exactly one closeDocument by the caller,
+   * so counting them is enough; the handle closes when the last one lets go.
+   */
+  refs: number
   /** Diagnostics for TOOL_DEBUG_PDFDATA: proves chunking rather than assuming it. */
   bytesServed: number
   chunkCount: number
@@ -66,14 +81,42 @@ export class PdfDataReader {
    * that one is a real bug and must not be swallowed.
    */
   private closed = new Set<string>()
+  /**
+   * Opens for a fileId that have not resolved yet. Two overlapping opens must
+   * share one fs.open: opening twice and storing the second over the first
+   * leaves the first handle referenced by nothing, so it survives only until
+   * the GC notices - which is what the "Closing file descriptor N on garbage
+   * collection" warnings were.
+   */
+  private opening = new Map<string, Promise<OpenResult>>()
 
   constructor(private readonly store: ManifestStore) {}
 
   async openDocument(fileId: string): Promise<OpenResult> {
-    // Reopening the same fileId (switching away and back) must not leak the
-    // previous handle.
-    await this.closeDocument(fileId)
+    // Join an open already in flight rather than starting a second one. If it
+    // failed, fall through and try again from scratch.
+    const inFlight = this.opening.get(fileId)
+    if (inFlight) await inFlight.catch(() => undefined)
 
+    const existing = this.open.get(fileId)
+    if (existing) {
+      existing.refs += 1
+      return {
+        length: existing.length,
+        initialData: await this.readRange(fileId, 0, Math.min(INITIAL_CHUNK_BYTES, existing.length))
+      }
+    }
+
+    const attempt = this.openNewDocument(fileId)
+    this.opening.set(fileId, attempt)
+    try {
+      return await attempt
+    } finally {
+      this.opening.delete(fileId)
+    }
+  }
+
+  private async openNewDocument(fileId: string): Promise<OpenResult> {
     const resolved = this.store.resolveFilePath(fileId)
     if (!resolved) throw new Error(`Unknown fileId: ${fileId}`)
 
@@ -85,7 +128,7 @@ export class PdfDataReader {
       // Reopening makes it live again, so it is no longer "closed".
       this.closed.delete(fileId)
       const { size } = await handle.stat()
-      this.open.set(fileId, { handle, length: size, bytesServed: 0, chunkCount: 0 })
+      this.open.set(fileId, { handle, length: size, refs: 1, bytesServed: 0, chunkCount: 0 })
       const initialData = await this.readRange(fileId, 0, Math.min(INITIAL_CHUNK_BYTES, size))
       return { length: size, initialData }
     } catch (err) {
@@ -138,6 +181,9 @@ export class PdfDataReader {
   async closeDocument(fileId: string): Promise<void> {
     const doc = this.open.get(fileId)
     if (!doc) return
+    // Someone else still holds it open - see OpenDocument.refs.
+    doc.refs -= 1
+    if (doc.refs > 0) return
     this.open.delete(fileId)
     this.closed.add(fileId)
     if (process.env.TOOL_DEBUG_PDFDATA) {
@@ -156,9 +202,24 @@ export class PdfDataReader {
     return doc ? { bytesServed: doc.bytesServed, chunkCount: doc.chunkCount, length: doc.length } : undefined
   }
 
-  /** Called on app shutdown so no handle outlives the process cleanly. */
+  /**
+   * Called on app shutdown so no handle outlives the process cleanly. This
+   * one ignores the reference count: the process is going away, so an
+   * outstanding reference is not a reason to keep a descriptor open.
+   */
   async closeAll(): Promise<void> {
-    await Promise.all([...this.open.keys()].map((fileId) => this.closeDocument(fileId)))
+    await Promise.all(
+      [...this.open.keys()].map((fileId) => {
+        const doc = this.open.get(fileId)
+        if (doc) doc.refs = 1
+        return this.closeDocument(fileId)
+      })
+    )
+  }
+
+  /** Test/diagnostic aid: how many callers currently hold a document open. */
+  refCountFor(fileId: string): number {
+    return this.open.get(fileId)?.refs ?? 0
   }
 
   /** Test/diagnostic aid: how many documents currently hold an open handle. */
