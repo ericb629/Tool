@@ -177,7 +177,7 @@ export class ManifestStore {
    * registers it in the manifest, and persists. Copying (rather than
    * referencing in place) is what makes the project folder self-contained -
    * the manifest's relativePath is then always inside rootPath, which the
-   * app-file:// protocol handler relies on to refuse anything outside.
+   * PDF chunk reader relies on to refuse anything outside.
    */
   async importPdf(sourceAbsolutePath: string): Promise<{ state: ProjectState; fileId: Uuid }> {
     if (!this.rootPath || !this.project) throw new Error('No project is open')
@@ -290,12 +290,12 @@ export class ManifestStore {
 
   /**
    * Resolves a fileId to its absolute path on disk plus the project root it
-   * must stay inside, for the app-file:// protocol handler
-   * (src/main/protocol.ts) that streams PDF bytes to the renderer's pdf.js
-   * instance. Reading happens in main; the renderer only ever sees the
-   * app-file:// URL, never a filesystem path and never file bytes over IPC.
+   * must stay inside, for the PDF chunk reader (src/main/pdfData.ts) that
+   * feeds pdf.js. All file access happens in main; the renderer only ever
+   * holds a fileId, never a filesystem path, and receives only the byte
+   * ranges pdf.js asks for - never a whole document.
    *
-   * The root is returned alongside the path so the handler can enforce
+   * The root is returned alongside the path so the caller can enforce
    * containment itself - this method deliberately does not decide access,
    * because relativePath comes from a manifest file on disk that a user (or
    * a corrupted/hand-edited project) could point anywhere.

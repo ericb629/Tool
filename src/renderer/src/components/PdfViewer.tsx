@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { PDFDocumentProxy } from 'pdfjs-dist'
 import { pdfjsLib } from '../pdf/pdfjs'
+import { IpcRangeTransport } from '../pdf/IpcRangeTransport'
 import PdfPageCanvas, { type PageOverlayContext } from './PdfPageCanvas'
 
 /** Pages rendered beyond the visible range, so scrolling doesn't flash blank. */
@@ -16,8 +17,12 @@ interface BasePageSize {
 }
 
 interface PdfViewerProps {
-  /** app-file:// URL; bytes are streamed by the main process, never sent over IPC. */
-  url: string
+  /**
+   * Manifest fileId. Bytes are pulled from the main process in chunks via
+   * IpcRangeTransport as pdf.js needs them - the document is never loaded
+   * whole.
+   */
+  fileId: string
   onDocumentLoaded?: (pageCount: number) => void
   renderOverlay?: (ctx: CanvasRenderingContext2D, context: PageOverlayContext) => void
   onPagePointerDown?: (event: React.PointerEvent<HTMLCanvasElement>, context: PageOverlayContext) => void
@@ -26,7 +31,7 @@ interface PdfViewerProps {
 }
 
 export default function PdfViewer({
-  url,
+  fileId,
   onDocumentLoaded,
   renderOverlay,
   onPagePointerDown,
@@ -54,11 +59,35 @@ export default function PdfViewer({
     setBasePageSizes([])
     setCurrentPage(1)
 
-    const task = pdfjsLib.getDocument({ url })
-    void task.promise.then(
-      async (loaded) => {
-        // Teardown is the loading task's job (see cleanup below), not the
-        // document proxy's - PDFDocumentProxy has no destroy().
+    let transport: IpcRangeTransport | undefined
+    let task: ReturnType<typeof pdfjsLib.getDocument> | undefined
+
+    void (async () => {
+      let opened: { length: number; initialData: Uint8Array }
+      try {
+        opened = await window.api.pdfData.open(fileId)
+      } catch (err) {
+        if (!cancelled) {
+          setStatus('error')
+          setErrorMessage(err instanceof Error ? err.message : String(err))
+        }
+        return
+      }
+      // Unmounted while the open was in flight: release the handle main is
+      // now holding, or it leaks for the life of the process.
+      if (cancelled) {
+        void window.api.pdfData.close(fileId).catch(() => undefined)
+        return
+      }
+
+      transport = new IpcRangeTransport(fileId, opened.length, opened.initialData)
+      // disableAutoFetch is what makes this a real win: without it pdf.js
+      // walks the entire document in the background and memory returns to
+      // the whole-file figure while still appearing to work.
+      task = pdfjsLib.getDocument({ range: transport, disableAutoFetch: true, disableStream: true })
+
+      try {
+        const loaded = await task.promise
         if (cancelled) return
         if (loaded.numPages === 0) {
           setStatus('empty')
@@ -72,29 +101,38 @@ export default function PdfViewer({
           if (cancelled) return
           const viewport = page.getViewport({ scale: 1 })
           sizes.push({ width: viewport.width, height: viewport.height })
+          // Release each page's cached resources as soon as it is measured,
+          // rather than leaving N instantiated page objects resident.
+          // (Measured: skipping the per-page measurement entirely does not
+          // reduce peak memory, so this loop is not the expensive part - but
+          // holding the pages afterwards is still pure waste.)
+          page.cleanup()
         }
         if (cancelled) return
         setDoc(loaded)
         setBasePageSizes(sizes)
         setStatus('ready')
         onDocumentLoaded?.(loaded.numPages)
-      },
-      (err) => {
+      } catch (err) {
         if (cancelled) return
         setStatus('error')
         setErrorMessage(err instanceof Error ? err.message : String(err))
       }
-    )
+    })()
 
     return () => {
       cancelled = true
-      void task.destroy()
+      // Order matters: abort the transport first so any chunk replies still
+      // in flight are discarded rather than pushed into a worker that is
+      // being torn down. abort() also closes the main-process file handle.
+      transport?.abort()
+      void task?.destroy()
     }
     // onDocumentLoaded deliberately excluded: it is a callback identity, not
     // an input to loading, and including it would reload the document on
     // every parent render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [url])
+  }, [fileId])
 
   // ---- container measurement (debounced) -----------------------------
   useLayoutEffect(() => {

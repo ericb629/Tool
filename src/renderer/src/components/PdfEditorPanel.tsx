@@ -52,8 +52,6 @@ export default function PdfEditorPanel({
   const [calibrationUnit, setCalibrationUnit] = useState<LinearUnit>('ft')
   const [measureUnit, setMeasureUnit] = useState<LinearUnit>('ft')
 
-  const url = `app-file://${fileId}/document.pdf`
-
   const handlePointerDown = useCallback(
     (event: React.PointerEvent<HTMLCanvasElement>, context: PageOverlayContext) => {
       if (mode === 'idle') return
@@ -201,7 +199,7 @@ export default function PdfEditorPanel({
   return (
     <div className="pdf-editor">
       <PdfViewer
-        url={url}
+        fileId={fileId}
         onDocumentLoaded={onDocumentLoaded}
         renderOverlay={renderOverlay}
         onPagePointerDown={handlePointerDown}

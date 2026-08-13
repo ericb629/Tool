@@ -6,9 +6,9 @@ import { isAbsolute, relative } from 'path'
  * `rootPath`; otherwise undefined.
  *
  * Deliberately kept free of any electron import so it can be unit tested -
- * this is the check that stops the app-file:// protocol from serving
- * arbitrary files off the user's disk, and an untested security boundary is
- * not a security boundary.
+ * this is the check that stops the PDF chunk reader (src/main/pdfData.ts)
+ * from serving arbitrary files off the user's disk, and an untested security
+ * boundary is not a security boundary.
  *
  * Both sides go through realpath before comparing, so a symlink planted
  * inside the project that points outside it is rejected too - comparing the

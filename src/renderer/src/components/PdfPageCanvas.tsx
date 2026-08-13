@@ -56,11 +56,13 @@ export default function PdfPageCanvas({
   useEffect(() => {
     let cancelled = false
     let task: RenderTask | undefined
+    let renderedPage: Awaited<ReturnType<PDFDocumentProxy['getPage']>> | undefined
     setRenderError(undefined)
 
     void (async () => {
       try {
         const page = await doc.getPage(pageNumber)
+        renderedPage = page
         if (cancelled) return
 
         const pageViewport = page.getViewport({ scale, rotation })
@@ -98,6 +100,10 @@ export default function PdfPageCanvas({
     return () => {
       cancelled = true
       task?.cancel()
+      // Drop the page's operator list, fonts and image resources. Scrolling a
+      // large sheet set without this retains every page ever visited, so
+      // virtualizing the canvases alone does not bound memory.
+      renderedPage?.cleanup()
       setViewport(undefined)
     }
   }, [doc, pageNumber, scale, rotation])

@@ -22,6 +22,15 @@ const api = {
     importPdf: (): Promise<{ state: ProjectState; fileId: string } | null> =>
       ipcRenderer.invoke('project:importPdf')
   },
+  // pdf.js data transport. Only the chunks pdf.js asks for cross this
+  // boundary; a whole document is never transferred. See src/main/pdfData.ts.
+  pdfData: {
+    open: (fileId: string): Promise<{ length: number; initialData: Uint8Array }> =>
+      ipcRenderer.invoke('pdfData:open', fileId),
+    read: (fileId: string, begin: number, end: number): Promise<Uint8Array> =>
+      ipcRenderer.invoke('pdfData:read', fileId, begin, end),
+    close: (fileId: string): Promise<void> => ipcRenderer.invoke('pdfData:close', fileId)
+  },
   manifest: {
     updateMarkup: (fileId: string, markup: MarkupObject): Promise<void> =>
       ipcRenderer.invoke('manifest:updateMarkup', fileId, markup),

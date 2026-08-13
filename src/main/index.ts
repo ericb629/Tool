@@ -1,11 +1,9 @@
 import { app, BrowserWindow, shell } from 'electron'
 import { join } from 'path'
 import { registerManifestIpcHandlers } from './ipc/manifest'
+import { registerPdfDataIpcHandlers } from './ipc/pdfData'
 import { ManifestStore } from './manifest/store'
-import { registerAppFileProtocolHandler, registerAppFileSchemeAsPrivileged } from './protocol'
-
-// Scheme privileges must be declared before app is ready.
-registerAppFileSchemeAsPrivileged()
+import { PdfDataReader } from './pdfData'
 
 function createWindow(): void {
   const mainWindow = new BrowserWindow({
@@ -39,12 +37,15 @@ function createWindow(): void {
   }
 }
 
+// One ManifestStore per process: the app opens a single project in a single
+// window (see ManifestStore's single-writer assumption). The reader holds
+// open file handles, so it is module-scoped in order to be closed on quit.
+const store = new ManifestStore()
+const pdfDataReader = new PdfDataReader(store)
+
 app.whenReady().then(() => {
-  // One ManifestStore per process: the app opens a single project in a
-  // single window (see ManifestStore's single-writer assumption).
-  const store = new ManifestStore()
-  registerAppFileProtocolHandler(store)
   registerManifestIpcHandlers(store)
+  registerPdfDataIpcHandlers(pdfDataReader)
 
   createWindow()
 
@@ -57,4 +58,9 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit()
   }
+})
+
+// Release any PDF file handles still held when the app exits.
+app.on('will-quit', () => {
+  void pdfDataReader.closeAll()
 })
