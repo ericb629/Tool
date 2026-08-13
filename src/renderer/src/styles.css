@@ -391,6 +391,12 @@ body,
   position: relative;
   background: #fff;
   box-shadow: 0 1px 6px rgba(0, 0, 0, 0.5);
+  /* Defensive, not load-bearing: the canvas is sized from the same viewport
+     helper as this slot, so it should always fit exactly. When it did not -
+     rotated sheets rendered portrait into a landscape slot - the overflow
+     painted over the pages below and read as those pages rendering blank.
+     Clipping keeps any future disagreement local to the page that has it. */
+  overflow: hidden;
 }
 
 .pdf-page__canvas {

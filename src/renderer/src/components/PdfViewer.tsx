@@ -3,6 +3,7 @@ import type { PDFDocumentProxy } from 'pdfjs-dist'
 import { pdfjsLib } from '../pdf/pdfjs'
 import { IpcRangeTransport } from '../pdf/IpcRangeTransport'
 import { canvasToPdfPoint } from '../pdf/coordinates'
+import { viewportForPage } from '../pdf/pageViewport'
 import { rectFromCorners, type UserSpaceRect } from '../pdf/hitTest'
 import {
   applyZoomAnchor,
@@ -123,7 +124,9 @@ export default function PdfViewer({
         for (let pageNumber = 1; pageNumber <= loaded.numPages; pageNumber++) {
           const page = await loaded.getPage(pageNumber)
           if (cancelled) return
-          const viewport = page.getViewport({ scale: 1 })
+          // Same helper the page canvas renders through, so the layout box and
+          // the rendered bitmap agree on rotated sheets. See pdf/pageViewport.
+          const viewport = viewportForPage(page, 1)
           sizes.push({ width: viewport.width, height: viewport.height })
           page.cleanup()
         }
