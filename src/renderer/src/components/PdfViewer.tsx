@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { PDFDocumentProxy } from 'pdfjs-dist'
+import { ChevronFirst, ChevronLast, ChevronLeft, ChevronRight } from 'lucide-react'
 import { pdfjsLib } from '../pdf/pdfjs'
 import { IpcRangeTransport } from '../pdf/IpcRangeTransport'
 import { canvasToPdfPoint } from '../pdf/coordinates'
 import { viewportForPage } from '../pdf/pageViewport'
+import { intersectRegion, type PageRegion } from '../pdf/tiles'
 import { rectFromCorners, type UserSpaceRect } from '../pdf/hitTest'
 import {
   applyZoomAnchor,
@@ -44,8 +46,11 @@ interface PdfViewerProps {
   onMarqueeComplete?: (selections: PageRectSelection[], additive: boolean) => void
   onContextMenu?: (clientX: number, clientY: number) => void
   overlayRevision?: string | number
-  toolbarExtras?: React.ReactNode
   paletteSlot?: React.ReactNode
+  /** Rendered at the left of the bottom status bar, before the page nav. */
+  statusBarSlot?: React.ReactNode
+  /** Rendered at the right end of the bottom status bar. */
+  statusBarEnd?: React.ReactNode
 }
 
 export default function PdfViewer({
@@ -58,8 +63,9 @@ export default function PdfViewer({
   onMarqueeComplete,
   onContextMenu,
   overlayRevision,
-  toolbarExtras,
-  paletteSlot
+  paletteSlot,
+  statusBarSlot,
+  statusBarEnd
 }: PdfViewerProps) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const pageContexts = useRef(new Map<number, PageOverlayContext>())
@@ -72,6 +78,10 @@ export default function PdfViewer({
   const [zoomMode, setZoomMode] = useState<ZoomMode>({ kind: 'fit-width' })
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 })
   const [scrollTop, setScrollTop] = useState(0)
+  // Tracked because tiling needs the visible region of each page, which at
+  // high zoom is a horizontal window too - a 36x24 sheet at 8x is 20736 CSS
+  // pixels wide, far past the viewport.
+  const [scrollLeft, setScrollLeft] = useState(0)
   const [currentPage, setCurrentPage] = useState(1)
   const [isPanning, setIsPanning] = useState(false)
   const [marqueeScreenRect, setMarqueeScreenRect] = useState<
@@ -232,6 +242,7 @@ export default function PdfViewer({
     // scrollable range, so at the edges the applied offset is not the
     // requested one and the virtualized range must follow what actually took.
     setScrollTop(element.scrollTop)
+    setScrollLeft(element.scrollLeft)
   }, [layout, scale])
 
   // ---- visible range -------------------------------------------------
@@ -268,9 +279,43 @@ export default function PdfViewer({
     setCurrentPage(candidate)
   }, [scrollTop, containerSize.height, layout])
 
+  /**
+   * The on-screen region of each page, in that page's own CSS pixels, keyed by
+   * page number. Only pages that intersect the viewport get an entry.
+   *
+   * This is what makes tiling possible: page-level virtualization decides
+   * which pages mount, this decides which REGION of a mounted page is
+   * rasterised. The two are independent - at 8x a single mounted page is far
+   * larger than the viewport, and without this it would rasterise in full.
+   */
+  const visibleRegions = useMemo(() => {
+    const regions = new Map<number, PageRegion>()
+    if (containerSize.width === 0 || containerSize.height === 0) return regions
+    const view: PageRegion = {
+      left: scrollLeft,
+      top: scrollTop,
+      width: containerSize.width,
+      height: containerSize.height
+    }
+    layout.pages.forEach((page, index) => {
+      const overlap = intersectRegion(view, page)
+      if (!overlap) return
+      // Content space -> page-local, which is what the tile grid is defined in.
+      regions.set(index + 1, {
+        left: overlap.left - page.left,
+        top: overlap.top - page.top,
+        width: overlap.width,
+        height: overlap.height
+      })
+    })
+    return regions
+  }, [layout, scrollLeft, scrollTop, containerSize])
+
   const handleScroll = useCallback(() => {
     const element = scrollRef.current
-    if (element) setScrollTop(element.scrollTop)
+    if (!element) return
+    setScrollTop(element.scrollTop)
+    setScrollLeft(element.scrollLeft)
   }, [])
 
   useEffect(() => {
@@ -368,6 +413,7 @@ export default function PdfViewer({
       element.scrollLeft = g.startScrollLeft - dx
       element.scrollTop = g.startScrollTop - dy
       setScrollTop(element.scrollTop)
+      setScrollLeft(element.scrollLeft)
       return
     }
 
@@ -410,8 +456,18 @@ export default function PdfViewer({
       const overlapsX = Math.min(g.startClientX, event.clientX) <= canvasRect.right && Math.max(g.startClientX, event.clientX) >= canvasRect.left
       const overlapsY = Math.min(g.startClientY, event.clientY) <= canvasRect.bottom && Math.max(g.startClientY, event.clientY) >= canvasRect.top
       if (!overlapsX || !overlapsY) continue
-      const a = canvasToPdfPoint(context.viewport, g.startClientX - canvasRect.left, g.startClientY - canvasRect.top)
-      const b = canvasToPdfPoint(context.viewport, event.clientX - canvasRect.left, event.clientY - canvasRect.top)
+      // The overlay canvas is a window onto the page, not the whole page, so
+      // its origin within the page has to be added back before converting.
+      const a = canvasToPdfPoint(
+        context.viewport,
+        g.startClientX - canvasRect.left + context.origin.x,
+        g.startClientY - canvasRect.top + context.origin.y
+      )
+      const b = canvasToPdfPoint(
+        context.viewport,
+        event.clientX - canvasRect.left + context.origin.x,
+        event.clientY - canvasRect.top + context.origin.y
+      )
       selections.push({ pageNumber, rect: rectFromCorners(a, b) })
     }
     onMarqueeComplete?.(selections, g.additive)
@@ -437,6 +493,35 @@ export default function PdfViewer({
     [scale, applyZoom]
   )
 
+  // ---- typeable page number -------------------------------------------
+  // Held as a string so a half-typed value is never coerced into a jump.
+  const [pageInput, setPageInput] = useState('1')
+  const pageInputFocused = useRef(false)
+  // Set when Enter or Esc already resolved the edit, so the blur that follows
+  // does not commit a second time.
+  const pageEditHandled = useRef(false)
+
+  // Follows the page as it changes by SCROLLING, not just via the arrows -
+  // but never while the field has focus, or it would overwrite typing.
+  useEffect(() => {
+    if (!pageInputFocused.current) setPageInput(String(currentPage))
+  }, [currentPage])
+
+  const commitPageInput = useCallback(() => {
+    const raw = pageInput.trim()
+    const parsed = Number(raw)
+    // Anything not a whole number in range reverts. Leaving a bad value in the
+    // field, or jumping to a coerced one, are both worse than not moving.
+    if (!/^\d+$/.test(raw) || !Number.isInteger(parsed) || parsed < 1 || parsed > basePageSizes.length) {
+      setPageInput(String(currentPage))
+      return
+    }
+    setPageInput(String(parsed))
+    const element = scrollRef.current
+    const target = layout.pages[parsed - 1]
+    if (element && target) element.scrollTo({ top: target.top })
+  }, [pageInput, basePageSizes.length, currentPage, layout])
+
   const pageCount = basePageSizes.length
 
   if (status === 'loading') return <div className="pdf-viewer__message">Loading PDF…</div>
@@ -454,35 +539,6 @@ export default function PdfViewer({
 
   return (
     <div className="pdf-viewer">
-      <div className="pdf-viewer__toolbar">
-        <button onClick={() => scrollToPage(currentPage - 1)} disabled={currentPage <= 1} title="Previous page">
-          ◀
-        </button>
-        <span className="pdf-viewer__page-indicator">
-          Page {currentPage} of {pageCount}
-        </span>
-        <button onClick={() => scrollToPage(currentPage + 1)} disabled={currentPage >= pageCount} title="Next page">
-          ▶
-        </button>
-        <span className="pdf-viewer__separator" />
-        <button onClick={() => changeZoomStep(-1)} title="Zoom out">
-          −
-        </button>
-        <span className="pdf-viewer__zoom-indicator">{Math.round(scale * 100)}%</span>
-        <button onClick={() => changeZoomStep(1)} title="Zoom in">
-          +
-        </button>
-        <button className={zoomMode.kind === 'fit-width' ? 'active' : ''} onClick={() => setZoomMode({ kind: 'fit-width' })}>
-          Fit width
-        </button>
-        <button className={zoomMode.kind === 'fit-page' ? 'active' : ''} onClick={() => setZoomMode({ kind: 'fit-page' })}>
-          Fit page
-        </button>
-        {toolbarExtras}
-      </div>
-
-      {paletteSlot}
-
       {/* Wrapper is the positioning context for the marquee, which must sit
           over the viewport and NOT scroll with the content. */}
       <div className="pdf-viewer__viewport">
@@ -520,6 +576,7 @@ export default function PdfViewer({
                     rotation={0}
                     width={page.width}
                     height={page.height}
+                    visible={visibleRegions.get(pageNumber)}
                     renderOverlay={renderOverlay}
                     onPointerDown={onPagePointerDown}
                     onViewportReady={registerPage}
@@ -542,6 +599,115 @@ export default function PdfViewer({
           }}
         />
       ) : null}
+      </div>
+
+      {/* Thin status bar. Sits outside the viewport wrapper and is flex:none,
+          so it costs a fixed ~26px and the scroll container keeps the rest -
+          scroll position, the ResizeObserver measurement and virtualization
+          are all unchanged by it. */}
+      <div className="pdf-viewer__statusbar">
+        {statusBarSlot}
+        <span className="pdf-viewer__separator" />
+        <button className="pdf-viewer__barbtn" onClick={() => changeZoomStep(-1)} title="Zoom out" aria-label="Zoom out">
+          −
+        </button>
+        <span className="pdf-viewer__zoom-indicator">{Math.round(scale * 100)}%</span>
+        <button className="pdf-viewer__barbtn" onClick={() => changeZoomStep(1)} title="Zoom in" aria-label="Zoom in">
+          +
+        </button>
+        <button
+          className={`pdf-viewer__barbtn${zoomMode.kind === 'fit-width' ? ' pdf-viewer__barbtn--active' : ''}`}
+          onClick={() => setZoomMode({ kind: 'fit-width' })}
+        >
+          Fit width
+        </button>
+        <button
+          className={`pdf-viewer__barbtn${zoomMode.kind === 'fit-page' ? ' pdf-viewer__barbtn--active' : ''}`}
+          onClick={() => setZoomMode({ kind: 'fit-page' })}
+        >
+          Fit page
+        </button>
+        <span className="pdf-viewer__separator" />
+        {paletteSlot}
+        <span className="pdf-viewer__separator" />
+        <div className="pdf-viewer__pagenav">
+          <button
+            className="pdf-viewer__iconbtn"
+            onClick={() => scrollToPage(1)}
+            disabled={currentPage <= 1}
+            title="First page"
+            aria-label="First page"
+          >
+            <ChevronFirst size={15} aria-hidden="true" />
+          </button>
+          <button
+            className="pdf-viewer__iconbtn"
+            onClick={() => scrollToPage(currentPage - 1)}
+            disabled={currentPage <= 1}
+            title="Previous page"
+            aria-label="Previous page"
+          >
+            <ChevronLeft size={15} aria-hidden="true" />
+          </button>
+          <span className="pdf-viewer__pagefield">
+          <input
+            className="pdf-viewer__page-input"
+            value={pageInput}
+            inputMode="numeric"
+            aria-label={`Page number, 1 to ${pageCount}`}
+            onChange={(e) => setPageInput(e.target.value)}
+            onFocus={(e) => {
+              pageInputFocused.current = true
+              e.target.select()
+            }}
+            onBlur={() => {
+              pageInputFocused.current = false
+              if (pageEditHandled.current) {
+                pageEditHandled.current = false
+                return
+              }
+              commitPageInput()
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault()
+                commitPageInput()
+                pageEditHandled.current = true
+                e.currentTarget.blur()
+              } else if (e.key === 'Escape') {
+                e.preventDefault()
+                // Kept local: the editor's global Esc would otherwise also
+                // cancel a draw or clear the selection.
+                e.stopPropagation()
+                setPageInput(String(currentPage))
+                pageEditHandled.current = true
+                e.currentTarget.blur()
+              }
+            }}
+          />
+          <span className="pdf-viewer__page-total">of {pageCount}</span>
+          </span>
+          <button
+            className="pdf-viewer__iconbtn"
+            onClick={() => scrollToPage(currentPage + 1)}
+            disabled={currentPage >= pageCount}
+            title="Next page"
+            aria-label="Next page"
+          >
+            <ChevronRight size={15} aria-hidden="true" />
+          </button>
+          <button
+            className="pdf-viewer__iconbtn"
+            onClick={() => scrollToPage(pageCount)}
+            disabled={currentPage >= pageCount}
+            title="Last page"
+            aria-label="Last page"
+          >
+            <ChevronLast size={15} aria-hidden="true" />
+          </button>
+        </div>
+        <span className="pdf-viewer__separator" />
+        {statusBarEnd}
       </div>
     </div>
   )

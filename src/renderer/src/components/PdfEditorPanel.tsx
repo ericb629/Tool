@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Hand, MousePointer2 } from 'lucide-react'
 import PdfViewer, { type PageRectSelection } from './PdfViewer'
 import { resolveInteraction, type InteractionMode } from '../tools/interaction'
 import type { PageOverlayContext } from './PdfPageCanvas'
@@ -101,7 +102,7 @@ export default function PdfEditorPanel({
     (event: React.PointerEvent<HTMLCanvasElement>, context: PageOverlayContext) => {
       if (event.button !== 0) return
       setMenu(undefined)
-      const point = pointerEventToPdfPoint(context.viewport, context.canvas, event)
+      const point = pointerEventToPdfPoint(context.viewport, context.canvas, event, context.origin)
 
       if (drawing) {
         // A draw belongs to one page; mixing pages would mix coordinate spaces.
@@ -244,31 +245,45 @@ export default function PdfEditorPanel({
   // Derived from the SELECTED markup, on demand - never from session state.
   const selectedQuantity = selectedMarkup ? quantityForMarkup(selectedMarkup.id) : undefined
 
-  const toolbarExtras = (
-    <>
-      <span className="pdf-viewer__separator" />
+  // Icon-only, so the title AND aria-label carry the meaning - without them
+  // the control is unusable to a screen reader and unguessable to everyone.
+  const modeToggle = (
+    <div className="mode-toggle" role="group" aria-label="Mouse interaction mode">
       <button
-        className={interactionMode === 'mouse' ? 'active' : ''}
+        type="button"
+        className={`mode-toggle__button${interactionMode === 'mouse' ? ' mode-toggle__button--active' : ''}`}
         onClick={() => setInteractionMode('mouse')}
         title="Mouse mode: left-drag pans, right-drag marquees"
+        aria-label="Mouse mode"
+        aria-pressed={interactionMode === 'mouse'}
       >
-        Mouse
+        <Hand size={17} aria-hidden="true" />
       </button>
       <button
-        className={interactionMode === 'arrow' ? 'active' : ''}
+        type="button"
+        className={`mode-toggle__button${interactionMode === 'arrow' ? ' mode-toggle__button--active' : ''}`}
         onClick={() => setInteractionMode('arrow')}
         title="Arrow mode: left-click selects, left-drag marquees"
+        aria-label="Arrow mode"
+        aria-pressed={interactionMode === 'arrow'}
       >
-        Arrow
+        <MousePointer2 size={17} aria-hidden="true" />
       </button>
-      <span className="pdf-viewer__quantity">
-        {selectedIds.length > 1
-          ? `${selectedIds.length} selected`
-          : selectedMarkup
-            ? `Selected: ${formatQuantity(selectedQuantity)}`
-            : 'Nothing selected'}
-      </span>
-    </>
+    </div>
+  )
+
+  // Status readout. formatQuantity is the only thing that renders a quantity
+  // here, and it maps the uncalibrated and not-measurable states to explicit
+  // words - never a blank, a dash, or a bare number that would read as a real
+  // measurement.
+  const quantityReadout = (
+    <span className="pdf-viewer__quantity">
+      {selectedIds.length > 1
+        ? `${selectedIds.length} selected`
+        : selectedMarkup
+          ? `Selected: ${formatQuantity(selectedQuantity)}`
+          : 'Nothing selected'}
+    </span>
   )
 
   return (
@@ -283,7 +298,8 @@ export default function PdfEditorPanel({
         onMarqueeComplete={handleMarquee}
         onContextMenu={(x, y) => setMenu({ x, y })}
         overlayRevision={overlayRevision}
-        toolbarExtras={toolbarExtras}
+        statusBarSlot={modeToggle}
+        statusBarEnd={quantityReadout}
         paletteSlot={
           <ToolPalette
             activeToolId={activeToolId}

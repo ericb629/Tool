@@ -47,12 +47,27 @@ export function pdfPointToCanvas(viewport: PageViewport, point: PdfPoint): Viewp
 /**
  * Convenience wrapper for a DOM pointer event: subtracts the canvas's own
  * position so callers don't hand-roll (and get wrong) the offset maths.
+ *
+ * `origin` is the canvas's top-left within the full page, in CSS pixels. The
+ * overlay canvas covers only the on-screen region of a page rather than the
+ * whole page - a full-page overlay would cross the canvas paint cliff at high
+ * zoom - so a position measured against its bounding rect is short by exactly
+ * this much. It defaults to the origin, which is the whole-page case.
+ *
+ * The conversion itself is unchanged: still viewport.convertToPdfPoint, still
+ * yielding a PdfPoint. Tiling is a render-layer concern and does not move the
+ * coordinate boundary.
  */
 export function pointerEventToPdfPoint(
   viewport: PageViewport,
   canvas: HTMLCanvasElement,
-  event: { clientX: number; clientY: number }
+  event: { clientX: number; clientY: number },
+  origin: { x: number; y: number } = { x: 0, y: 0 }
 ): PdfPoint {
   const rect = canvas.getBoundingClientRect()
-  return canvasToPdfPoint(viewport, event.clientX - rect.left, event.clientY - rect.top)
+  return canvasToPdfPoint(
+    viewport,
+    event.clientX - rect.left + origin.x,
+    event.clientY - rect.top + origin.y
+  )
 }

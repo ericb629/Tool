@@ -293,38 +293,6 @@ body,
   flex-direction: column;
 }
 
-.pdf-viewer__toolbar {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  flex-wrap: wrap;
-  padding: 6px 8px;
-  border-bottom: 1px solid #3a3a3a;
-  background: #252525;
-  font-size: 12px;
-  color: #e8e8e8;
-}
-
-.pdf-viewer__toolbar button {
-  background: #3a3a3a;
-  color: #e8e8e8;
-  border: 1px solid #4a4a4a;
-  border-radius: 3px;
-  padding: 3px 8px;
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.pdf-viewer__toolbar button.active {
-  background: #5a5a5a;
-  border-color: #7a7a7a;
-}
-
-.pdf-viewer__toolbar button:disabled {
-  opacity: 0.4;
-  cursor: default;
-}
-
 .pdf-viewer__separator {
   width: 1px;
   align-self: stretch;
@@ -332,20 +300,177 @@ body,
   margin: 0 4px;
 }
 
-.pdf-viewer__page-indicator,
 .pdf-viewer__zoom-indicator {
-  min-width: 74px;
+  min-width: 48px;
   text-align: center;
   color: #bbb;
 }
 
-.pdf-viewer__zoom-indicator {
-  min-width: 48px;
+/* Bottom status bar. flex:none and deliberately short - it must not take
+   meaningful height from the sheet, which is the whole point of the viewer. */
+.pdf-viewer__statusbar {
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 2px;
+  flex: 0 0 auto;
+  min-height: 30px;
+  padding: 0 6px;
+  border-top: 1px solid #3a3a3a;
+  background: #252526;
+  font-size: 12px;
+  color: #c8c8c8;
 }
 
+/* Text buttons living in the bar (zoom, fit, and anything else moved down
+   from the old top toolbar). */
+.pdf-viewer__barbtn {
+  align-self: center;
+  padding: 3px 9px;
+  font-size: 12px;
+  font-family: inherit;
+  color: #d8d8d8;
+  background: #3a3a3a;
+  border: 1px solid #4a4a4a;
+  border-radius: 3px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.pdf-viewer__barbtn:hover {
+  background: #454545;
+}
+
+.pdf-viewer__barbtn--active {
+  background: #5a5a5a;
+  border-color: #7a7a7a;
+}
+
+/* Everything in the bar centres itself vertically; the bar stretches its
+   children so the active mode button can be a full-height block like the
+   reference, rather than a floating pill. */
+.pdf-viewer__statusbar > * {
+  align-self: center;
+}
+
+.pdf-viewer__statusbar .pdf-viewer__separator {
+  align-self: stretch;
+  margin: 5px 5px;
+  background: #3f3f42;
+}
+
+.pdf-viewer__pagenav {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+}
+
+.pdf-viewer__iconbtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  background: transparent;
+  color: #c8c8c8;
+  border: none;
+  border-radius: 2px;
+  cursor: pointer;
+}
+
+.pdf-viewer__iconbtn:hover:not(:disabled) {
+  background: #3a3a3d;
+}
+
+.pdf-viewer__iconbtn:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+/* Input and total share one bordered box, so the page position reads as a
+   single field the way it does in Bluebeam. */
+.pdf-viewer__pagefield {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 21px;
+  margin: 0 3px;
+  padding: 0 7px;
+  background: #333336;
+  border: 1px solid #55555a;
+  border-radius: 3px;
+}
+
+.pdf-viewer__pagefield:focus-within {
+  border-color: #7cb3ff;
+}
+
+.pdf-viewer__page-input {
+  width: 32px;
+  padding: 0;
+  text-align: right;
+  font-size: 12px;
+  font-family: inherit;
+  color: #e8e8e8;
+  background: transparent;
+  border: none;
+}
+
+.pdf-viewer__page-input:focus {
+  outline: none;
+}
+
+.pdf-viewer__page-total {
+  color: #b0b0b0;
+  white-space: nowrap;
+}
+
+/* Segmented icon toggle for the mouse/arrow interaction mode. Flush blocks
+   with no surrounding container - the active one is a solid blue tile. */
+.mode-toggle {
+  display: inline-flex;
+  align-self: stretch;
+  gap: 1px;
+}
+
+.mode-toggle__button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  padding: 0;
+  background: transparent;
+  color: #c8c8c8;
+  border: none;
+  border-radius: 0;
+  cursor: pointer;
+}
+
+.mode-toggle__button:hover:not(.mode-toggle__button--active) {
+  background: #3a3a3d;
+}
+
+.mode-toggle__button--active {
+  background: #1569c8;
+  color: #ffffff;
+}
+
+/* Icon-only controls give no other cue about focus, so the ring is not
+   optional here. :focus-visible so a mouse click does not leave one behind. */
+.mode-toggle__button:focus-visible,
+.pdf-viewer__iconbtn:focus-visible,
+.pdf-viewer__page-input:focus-visible {
+  outline: 2px solid #7cb3ff;
+  outline-offset: 1px;
+}
+
+/* No margin-left:auto - the bar centres its contents as one group, and an
+   auto margin here would push this to the right edge and break that. */
 .pdf-viewer__quantity {
-  margin-left: auto;
   color: #aaa;
+  white-space: nowrap;
 }
 
 .pdf-viewer__scroll {
@@ -404,6 +529,38 @@ body,
   top: 0;
   left: 0;
   display: block;
+}
+
+/* The low-resolution full-page fallback. Sits under the tiles so the page is
+   never white while they rasterise; sharp tiles cover it as they land. */
+.pdf-page__canvas--preview {
+  width: 100%;
+  height: 100%;
+}
+
+/* Tile container. Tiles are absolutely positioned inside it in page-local CSS
+   pixels and are appended imperatively once they hold a finished bitmap - see
+   PdfPageCanvas. */
+.pdf-page__tiles {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.pdf-page__tile {
+  position: absolute;
+  display: block;
+}
+
+/* The overlay is a window onto the page, positioned and sized inline from the
+   current tile-set bounds, so it must NOT be pinned to the page's top-left
+   like the preview is. */
+.pdf-page__canvas--overlay {
+  top: auto;
+  left: auto;
 }
 
 /* No cursor here on purpose. `cursor` inherits, and the scroll container sets
@@ -738,12 +895,12 @@ body,
 
 /* ---- tools, marquee, context menu ---- */
 
+/* Lives inline in the bottom bar now, so no strip background or border of
+   its own - the bar provides those. */
 .tool-palette {
   display: flex;
-  gap: 4px;
-  padding: 5px 8px;
-  background: #232323;
-  border-bottom: 1px solid #3a3a3a;
+  align-items: center;
+  gap: 3px;
 }
 
 .tool-palette__tool {
@@ -751,9 +908,11 @@ body,
   color: #ccc;
   border: 1px solid #4a4a4a;
   border-radius: 3px;
-  padding: 4px 12px;
+  padding: 3px 10px;
   font-size: 12px;
+  font-family: inherit;
   cursor: pointer;
+  white-space: nowrap;
 }
 
 .tool-palette__tool--active {

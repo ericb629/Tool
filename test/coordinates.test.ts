@@ -2,6 +2,7 @@ import { strict as assert } from 'node:assert'
 import { beforeAll, describe, it } from 'vitest'
 import { getDocument } from 'pdfjs-dist/legacy/build/pdf.mjs'
 import { deriveQuantity } from '../src/shared/manifest/quantity'
+import { pointerEventToPdfPoint } from '../src/renderer/src/pdf/coordinates'
 import type { MarkupObject, PageCalibration, PdfPoint } from '../src/shared/manifest/types'
 
 // These tests exercise the REAL pdf.js PageViewport, not a stand-in, because
@@ -198,5 +199,82 @@ describe('non-zero-origin MediaBox', () => {
     const back = pointerToPdfPoint(viewport, cx, cy)
     assert.ok(Math.abs(back.x - original.x) < 1e-9)
     assert.ok(Math.abs(back.y - original.y) < 1e-9)
+  })
+})
+
+describe('windowed overlay origin', () => {
+  /**
+   * The overlay canvas covers only the on-screen region of a page, not the
+   * whole page - a full-page overlay would cross the canvas paint cliff at
+   * high zoom. That means a pointer position measured against the overlay's
+   * bounding rect is short by the overlay's origin within the page, and
+   * pointerEventToPdfPoint has to add it back.
+   *
+   * If this is wrong, every point placed at high zoom lands somewhere else on
+   * the sheet and every quantity derived from it is wrong while looking
+   * entirely plausible. Tiling must not move the coordinate boundary.
+   */
+  function fakeCanvas(rectLeft: number, rectTop: number): HTMLCanvasElement {
+    return {
+      getBoundingClientRect: () => ({ left: rectLeft, top: rectTop })
+    } as unknown as HTMLCanvasElement
+  }
+
+  it('lands on the same PdfPoint as a whole-page overlay would', async () => {
+    const doc = await getDocument({ data: buildPdf(), disableWorker: true }).promise
+    const page = await doc.getPage(1)
+    const viewport = page.getViewport({ scale: 8 })
+
+    // A page-local CSS position, and a click on it.
+    const pageX = 3000
+    const pageY = 2100
+    const expected = pointerToPdfPoint(viewport, pageX, pageY)
+
+    // Whole-page overlay: canvas pinned to the page's top-left on screen.
+    const pageScreenLeft = -2400
+    const pageScreenTop = -1800
+    const whole = pointerEventToPdfPoint(viewport, fakeCanvas(pageScreenLeft, pageScreenTop), {
+      clientX: pageScreenLeft + pageX,
+      clientY: pageScreenTop + pageY
+    })
+    assert.ok(Math.abs(whole.x - expected.x) < 1e-9)
+    assert.ok(Math.abs(whole.y - expected.y) < 1e-9)
+
+    // Windowed overlay: canvas starts at (2048, 1024) within the page, so on
+    // screen it sits that much further right and down.
+    const origin = { x: 2048, y: 1024 }
+    const windowed = pointerEventToPdfPoint(
+      viewport,
+      fakeCanvas(pageScreenLeft + origin.x, pageScreenTop + origin.y),
+      { clientX: pageScreenLeft + pageX, clientY: pageScreenTop + pageY },
+      origin
+    )
+    assert.ok(Math.abs(windowed.x - expected.x) < 1e-9, `x drifted: ${windowed.x} vs ${expected.x}`)
+    assert.ok(Math.abs(windowed.y - expected.y) < 1e-9, `y drifted: ${windowed.y} vs ${expected.y}`)
+  })
+
+  it('agrees across zooms and overlay origins', async () => {
+    const doc = await getDocument({ data: buildPdf(), disableWorker: true }).promise
+    const page = await doc.getPage(1)
+
+    for (const scale of [0.25, 1, 8, 12]) {
+      const viewport = page.getViewport({ scale })
+      for (const origin of [{ x: 0, y: 0 }, { x: 1024, y: 512 }, { x: 3072, y: 2048 }]) {
+        const target: PdfPoint = { x: 300, y: 400 }
+        const [cx, cy] = viewport.convertToViewportPoint(target.x, target.y)
+        // The overlay sits at `origin` in the page; the page's top-left is at
+        // screen 0,0 here, so the canvas rect starts at the origin.
+        const back = pointerEventToPdfPoint(
+          viewport,
+          fakeCanvas(origin.x, origin.y),
+          { clientX: cx, clientY: cy },
+          origin
+        )
+        assert.ok(
+          Math.abs(back.x - target.x) < 1e-9 && Math.abs(back.y - target.y) < 1e-9,
+          `scale ${scale} origin ${origin.x},${origin.y}: got ${back.x},${back.y}`
+        )
+      }
+    }
   })
 })
