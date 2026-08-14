@@ -175,7 +175,25 @@ export class PdfDataReader {
     }
     doc.bytesServed += filled
     doc.chunkCount += 1
-    return new Uint8Array(buffer.buffer, buffer.byteOffset, filled)
+    // Copy into an exactly-sized buffer rather than returning a VIEW over the
+    // read buffer.
+    //
+    // Buffer.allocUnsafe serves any request under `Buffer.poolSize >>> 1` out
+    // of a shared pool. MEASURED on this Node build rather than assumed:
+    // poolSize is 65536, so EVERY read under 32768 bytes is pooled and its
+    // `buffer.buffer` is the full 64KB pool with a non-zero `byteOffset`.
+    //
+    // Structured clone across IPC serialises the BACKING ArrayBuffer, not just
+    // the view, so the renderer received the whole pool and could read
+    // whatever else had recently been allocated in the main process via
+    // `chunk.buffer`.
+    //
+    // That is not a rare edge: pdf.js's 64KB rangeChunkSize is the size of its
+    // *walk* requests, and plenty of reads come in smaller - xref fragments, a
+    // PDF under 64KB, and any range clamped against the end of the file. The
+    // renderer has no `fs` access precisely so that main-process memory cannot
+    // reach it, and this leaked straight past that.
+    return new Uint8Array(buffer.subarray(0, filled))
   }
 
   async closeDocument(fileId: string): Promise<void> {

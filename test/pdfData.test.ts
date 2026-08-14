@@ -112,6 +112,39 @@ describe('PdfDataReader.readRange', () => {
     await reader.closeDocument(fileId)
   })
 
+  it('never returns a view over a larger backing buffer', async () => {
+    // Buffer.allocUnsafe serves any request under `Buffer.poolSize >>> 1` from
+    // a shared pool. MEASURED on this Node build, not assumed: poolSize is
+    // 65536, so everything under 32768 bytes is pooled and its backing
+    // ArrayBuffer is the full 64KB pool.
+    //
+    // Returning `new Uint8Array(buffer.buffer, byteOffset, filled)` therefore
+    // handed back a view whose BACKING buffer was that pool - and structured
+    // clone across IPC serialises the backing buffer, not the view, so
+    // unrelated main-process bytes reached the renderer via `chunk.buffer`.
+    // The renderer has no `fs` access precisely so that cannot happen.
+    //
+    // Sizes straddle the real threshold. Under the old code every one of these
+    // returned a 65536-byte backing buffer.
+    const { reader, fileId, contents } = await setup()
+    await reader.openDocument(fileId)
+    for (const size of [1, 64, 1000, 8192, 32767, 32768, 65536]) {
+      const chunk = await reader.readRange(fileId, 0, size)
+      assert.equal(chunk.byteOffset, 0, `byteOffset must be 0 for a ${size}-byte read`)
+      assert.equal(
+        chunk.buffer.byteLength,
+        chunk.byteLength,
+        `backing buffer must be exactly the chunk for a ${size}-byte read, not a pool slice`
+      )
+      assert.deepEqual(Buffer.from(chunk), contents.subarray(0, size))
+    }
+    // Same for a clamped tail read, the other way a small chunk arises.
+    const tail = await reader.readRange(fileId, contents.length - 12, contents.length + 500)
+    assert.equal(tail.byteOffset, 0)
+    assert.equal(tail.buffer.byteLength, tail.byteLength)
+    await reader.closeDocument(fileId)
+  })
+
   it('clamps a range extending past EOF', async () => {
     const { reader, fileId, contents } = await setup()
     await reader.openDocument(fileId)
