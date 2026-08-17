@@ -236,6 +236,100 @@ and a page must never wait forever. **Unbuilt and unmeasured**; the hypothesis
 above is inferred from tile counts, not observed, so instrument the release
 point before writing the change.
 
+---
+
+## THE JUDGEMENT CALL — what to do next, decided without the deciding measurement
+
+The instrumentation in `59a78ef` was never run. This section is a **judgement,
+not a finding**, and it is written that way on purpose so a future session does
+not inherit it as measured fact. Everything above this line is measured;
+everything in this section is reasoning from it.
+
+### The reframing that decides it
+
+Cost per arrival is **one parse plus N full replays of the operator list**, and
+only the parse is cached. On a cold fit-width arrival at page 138 the viewer
+performs:
+
+  1 parse            2429 ms, irreducible without changing pdf.js's decoder
+  2-6 tile renders   each replays the ENTIRE operator list
+  1 preview render   replays it again, at low resolution
+  1 neighbour        parse 5265 ms + its own preview replay
+
+Decode is cached after the first replay, so replays 2..N are draw and fill - but
+on a sheet whose content *is* twelve large aerials, drawing twelve large aerials
+is not the cheap part, and every replay pays rAF pacing independently.
+
+**The insight is that tiling is a HIGH-ZOOM mechanism being paid for at fit
+width, where it earns nothing.** Tiles exist for two reasons, both of which are
+about zoom: staying clear of the 2^28 canvas paint cliff, and bounding memory
+when a page is far larger than the viewport. At fit width neither applies - the
+whole page is 1.7-4.3 Mpx of CSS pixels and fits comfortably in one safe canvas -
+yet the page is still cut into 2-6 canvases, each replaying everything.
+
+### Ranked, highest expected value first
+
+**1. Render a page as ONE canvas whenever it fits in one safely, and tile only
+when it does not.** This is the change to make. It removes N-1 redundant
+full-page replays from the common case - every fit-width arrival, which is how
+the app is normally used - and it does so by construction rather than by tuning.
+
+The threshold is arithmetic, not taste: a 2592x1728 page at scale `s` and dpr 2
+is `17.9M * s²` device pixels, so it stays inside the existing 64 Mpx
+`MAX_CANVAS_PIXELS` budget up to about **s = 1.9**. Fit width is 0.48-0.98. Above
+the threshold, tile exactly as now. The measured cliff is ~252 Mpx, so the budget
+keeps a 4x margin and the safety property is preserved by construction.
+
+Note this is NOT "raise `TILE_PX` to 2048". That proposal came with a ~46%
+prediction from the `T(N) = N*D + F` model, whose `D` was interpreted as
+per-canvas operator-list *dispatch* - and dispatch is exactly what the op-count
+finding discredited. **Do not resurrect the number.** The mechanism here is
+different and does not depend on that model: it is "stop replaying the operator
+list N times when one replay would do", and its magnitude is unknown.
+
+**2. Do not pay for the overscan neighbour on a page JUMP.** `OVERSCAN_PAGES = 1`
+means a typed jump to 138 also mounts 137, and on exhibit sheets that is 5265 ms
+of worker time for a page that - per 2e - is entirely off screen. The current
+hold *defers* that work; it does not remove it, and whether it lands inside the
+destination's render window is precisely the thing that was never measured.
+
+Mounting overscan only once the destination has **settled** (its whole tile set
+complete, not its first tile) removes the uncertainty rather than chasing it.
+Overscan earns its keep while scrolling, where the neighbour is where you are
+about to be; on a typed jump the user asked for one page. This subsumes the
+"release on tile-set completion" candidate in 2e, and it needs the same two
+escape hatches for the same reason.
+
+**3. Skip the arrival preview when tiles already cover the page.** At fit width
+the visible region *is* the page, so the preview is a whole extra replay of the
+same content, at low resolution, immediately covered. Its real job is covering
+the page during a ZOOM, where tiles are discarded and it is not re-rendered -
+so keep it for that and stop rendering it on arrival. Smallest of the three, and
+the one most likely to be already half-solved by item 1.
+
+### What this is expected to achieve, stated so it can be falsified
+
+Page 138 arriving in roughly **2.5-3.5 s** instead of 6349 ms, with the floor
+set by its own 2429 ms parse. Normal vector sheets are already at 1.2 s against a
+141-370 ms parse and should improve proportionally less.
+
+**Sub-second is probably not reachable and should not be the target.** Bluebeam
+is native C++; its JBIG2/JPEG2000 decode is likely far faster than pdf.js's wasm
+path, and no amount of scheduling closes a decoder gap. rAF pacing is a hard
+floor underneath all of this.
+
+### Confidence, honestly
+
+- Item 1: mechanism certain, magnitude unknown. Fewer replays cannot be slower.
+- Item 2: magnitude known (5265 ms of real work), behaviour trade real - scroll
+  down immediately after a jump and the neighbour will not be ready.
+- Item 3: mechanism certain, magnitude small.
+
+If someone runs the instrumentation before building any of this, it can only
+sharpen the order. It cannot make item 1 wrong.
+
+---
+
 ### 3. Decode-to-target-size — no mechanism yet
 Page 138's aerials decode at full resolution to fill a 250k-pixel preview at 35%
 zoom. `maxImageSize` is **not** the answer and must not be reached for: it is a
