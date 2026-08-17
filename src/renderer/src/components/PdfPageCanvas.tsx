@@ -153,6 +153,11 @@ export default function PdfPageCanvas({
 
   const [page, setPage] = useState<PDFPageProxy | undefined>(undefined)
   const [renderError, setRenderError] = useState<string | undefined>(undefined)
+  /**
+   * Whether at least one tile has been painted for this page. Gates the preview
+   * so the sharp layer is not competing with it - see the preview effect.
+   */
+  const [hasTile, setHasTile] = useState(false)
 
   // ---- page handle ----------------------------------------------------
   useEffect(() => {
@@ -187,6 +192,7 @@ export default function PdfPageCanvas({
       // RETAINED_PAGES entries and cleans up on eviction. See pdf/pageRetention.
       if (loaded) retainPage(doc, pageNumber, loaded)
       setPage(undefined)
+      setHasTile(false)
     }
   }, [doc, pageNumber])
 
@@ -220,8 +226,44 @@ export default function PdfPageCanvas({
   )
 
   // ---- preview: one small bitmap, never re-rendered on zoom ------------
+  //
+  // ORDERING: a page that is going to rasterise tiles waits for its FIRST TILE
+  // before rendering its preview, so the two do not compete.
+  //
+  // They were doing the same expensive work back to back, in front of the user:
+  // both replay the whole operator list, so on an image-heavy sheet both decode
+  // the same aerials. Measured jumping to page 23 (four pages mount): 4 previews
+  // at 1980ms median against 2 tiles at 1658ms - six concurrent renders, four of
+  // them previews.
+  //
+  // The preview is NOT giving up its job by waiting. Its stated purpose is that
+  // the page is never white before tiles land, and it has never actually done
+  // that: in every measurement it is no faster than a tile (1980 vs 1658ms here,
+  // 318 vs 318ms warm, 1560 vs 1659ms on pages 1-3), because it replays the same
+  // operator list and dispatch dominates its smaller fill. What it genuinely
+  // does is cover the page during a ZOOM, where tiles are discarded and the
+  // preview is not re-rendered. Rendering it just after the first tile keeps
+  // that intact.
+  //
+  // A page with no visible region rasterises no tiles, so it renders its preview
+  // immediately - it needs one ready for when it scrolls into view. Deferring
+  // those too needs a shared cross-page gauge (React commits every child's
+  // render phase before any effect runs, so a synchronous counter still races);
+  // that is the render-priority queue on the roadmap, not this change.
+  const wantsTiles = tiles.length > 0
+
+  // Set once a preview has been painted for this page+rotation, so landing a
+  // tile later cannot trigger a second one. "Rendered once per page" stays true.
+  const previewPainted = useRef(false)
+  useEffect(() => {
+    previewPainted.current = false
+  }, [page, rotation])
+
   useEffect(() => {
     if (!page) return
+    if (previewPainted.current) return
+    // Waiting on the sharp layer. When the first tile lands this effect re-runs.
+    if (wantsTiles && !hasTile) return
     let cancelled = false
     let task: RenderTask | undefined
 
@@ -267,6 +309,7 @@ export default function PdfPageCanvas({
         offscreen.height = 0
         perfOffscreenClose() // PERF
         perfCanvasSample() // PERF
+        previewPainted.current = true
       } catch (err) {
         // Guarded: the throw can predate the offscreen allocation (a bad
         // viewport), and an unguarded close would under-count the live gauge.
@@ -283,7 +326,9 @@ export default function PdfPageCanvas({
       cancelled = true
       task?.cancel()
     }
-  }, [page, rotation])
+    // hasTile/wantsTiles are the gate. Booleans, not the `visible` object, so a
+    // pan that only changes the visible RECTANGLE does not re-run this.
+  }, [page, rotation, wantsTiles, hasTile])
 
   // The preview is stretched to whatever the page box currently is, so a zoom
   // never leaves it at the wrong size while tiles are still rendering.
@@ -399,6 +444,9 @@ export default function PdfPageCanvas({
 
         layer.appendChild(canvas)
         liveTiles.current.set(key, canvas)
+        // Opens the preview gate: the sharp layer is on screen for this page, so
+        // its preview can render now without competing for animation frames.
+        if (!cancelled) setHasTile(true)
         perfPresent(blitAt, pageNumber) // PERF
         // PERF: sampled right after a tile is attached - the moment the live
         // canvas count is highest during a zoom.
