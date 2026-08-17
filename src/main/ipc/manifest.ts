@@ -14,8 +14,12 @@ import { ManifestStore } from '../manifest/store'
  * between the renderer and the filesystem for project data - the renderer
  * never touches fs directly (contextIsolation is on, nodeIntegration is
  * off; see src/main/index.ts and src/preload/index.ts). PDF bytes are
- * served separately over the app-file:// protocol (see src/main/protocol.ts),
- * not through this IPC surface.
+ * served separately, as ranged chunks over the pdfData IPC channel (see
+ * src/main/pdfData.ts), not through this IPC surface.
+ *
+ * There is no custom protocol scheme and must not be: pdf.js hard-codes
+ * incremental loading to http(s), so a custom scheme silently downloads whole
+ * documents. See CLAUDE.md.
  */
 export function registerManifestIpcHandlers(store: ManifestStore): void {
   ipcMain.handle('project:open', async (_event, folderPath: string): Promise<ProjectState> => {

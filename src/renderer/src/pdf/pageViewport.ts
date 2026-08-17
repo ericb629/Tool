@@ -57,9 +57,16 @@ export function viewportForPage(page: RotatablePage, scale: number, extraRotatio
  *
  * Past this point the page is rendered at a lower device resolution and
  * scaled up by the browser, so extreme zoom degrades to SOFT rather than
- * blank. Keeping linework crisp at that zoom needs tiled rendering - drawing
- * only the visible region of the page instead of the whole sheet - which this
- * app does not do.
+ * blank.
+ *
+ * SCOPE: this budget now governs the PREVIEW bitmap only. Tiled rendering
+ * shipped, and it is what keeps linework crisp at high zoom - a tile is
+ * TILE_PX CSS pixels square at every scale, so its backing store cannot
+ * approach the cliff however far the user zooms, and the tile layer therefore
+ * renders at full devicePixelRatio with no clamp. See pdf/tiles.ts.
+ *
+ * deviceScaleFor has exactly one production caller (PdfPageCanvas's preview),
+ * and it passes PREVIEW_MAX_PIXELS rather than the default below.
  */
 export const MAX_CANVAS_PIXELS = 64_000_000
 
