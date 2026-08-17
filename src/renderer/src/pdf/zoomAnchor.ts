@@ -105,6 +105,32 @@ export function captureZoomAnchor(
 }
 
 /**
+ * The anchor for a scale change that has no cursor: the centre of the viewport.
+ *
+ * Fit width, fit page and the +/- buttons all change scale without a pointer
+ * position, and they still have to preserve where the user is in the document.
+ * Anchoring on the viewport centre is what makes "the page I was looking at is
+ * still the page I am looking at" true for them.
+ *
+ * Without an anchor, a scale change leaves scrollTop untouched while every page
+ * box moves, so a fixed pixel offset lands somewhere else entirely - and the
+ * error grows with both document length and the size of the scale change. That
+ * was a real bug: the fit buttons set the zoom mode directly and never captured
+ * an anchor, so fit width jumped backwards, fit page then jumped forwards, and
+ * from far zoomed out the destination looked random.
+ */
+export function centreAnchor(
+  layout: PageLayout,
+  scale: number,
+  scrollLeft: number,
+  scrollTop: number,
+  containerWidth: number,
+  containerHeight: number
+): ZoomAnchor | undefined {
+  return captureZoomAnchor(layout, scale, scrollLeft, scrollTop, containerWidth / 2, containerHeight / 2)
+}
+
+/**
  * Scroll offsets that put the anchored point back under the cursor, given the
  * layout recomputed at the NEW scale.
  *

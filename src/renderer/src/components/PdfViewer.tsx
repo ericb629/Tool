@@ -11,6 +11,7 @@ import { rectFromCorners, type UserSpaceRect } from '../pdf/hitTest'
 import {
   applyZoomAnchor,
   captureZoomAnchor,
+  centreAnchor,
   computePageLayout,
   type BasePageSize,
   type ZoomAnchor
@@ -278,6 +279,40 @@ export default function PdfViewer({
     if (!anchor) return
     pendingAnchor.current = anchor
     setZoomMode({ kind: 'fixed', scale: clamped })
+  }, [])
+
+  const zoomModeRef = useRef(zoomMode)
+  zoomModeRef.current = zoomMode
+
+  /**
+   * Fit width / fit page. These change scale with no pointer to anchor on, so
+   * they anchor on the viewport centre.
+   *
+   * They used to call setZoomMode directly, which captured NO anchor at all:
+   * scale changed, every page box moved, and scrollTop stayed exactly where it
+   * was, so the view landed somewhere else entirely. Fit width jumped
+   * backwards, fit page then jumped forwards, and from far zoomed out the
+   * destination looked random - the error scales with both document length and
+   * the size of the scale change. See test/zoomAnchor.test.ts, which pins the
+   * invariant and also demonstrates the old behaviour.
+   */
+  const applyFitMode = useCallback((kind: 'fit-width' | 'fit-page') => {
+    const element = scrollRef.current
+    // Already in this mode: the scale is not changing, so capturing an anchor
+    // would leave a stale one to be consumed by some later layout change.
+    if (!element || zoomModeRef.current.kind === kind) return
+    const anchor = centreAnchor(
+      layoutRef.current,
+      scaleRef.current,
+      element.scrollLeft,
+      element.scrollTop,
+      // clientWidth/Height, not the bounding rect: the scrollbar is not part of
+      // the visible viewport and would bias the centre.
+      element.clientWidth,
+      element.clientHeight
+    )
+    if (anchor) pendingAnchor.current = anchor
+    setZoomMode({ kind })
   }, [])
 
   useLayoutEffect(() => {
@@ -684,13 +719,13 @@ export default function PdfViewer({
         </button>
         <button
           className={`pdf-viewer__barbtn${zoomMode.kind === 'fit-width' ? ' pdf-viewer__barbtn--active' : ''}`}
-          onClick={() => setZoomMode({ kind: 'fit-width' })}
+          onClick={() => applyFitMode('fit-width')}
         >
           Fit width
         </button>
         <button
           className={`pdf-viewer__barbtn${zoomMode.kind === 'fit-page' ? ' pdf-viewer__barbtn--active' : ''}`}
-          onClick={() => setZoomMode({ kind: 'fit-page' })}
+          onClick={() => applyFitMode('fit-page')}
         >
           Fit page
         </button>
