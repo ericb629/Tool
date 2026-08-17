@@ -1,4 +1,5 @@
 import { PDFDataRangeTransport } from 'pdfjs-dist'
+import { perfCount, perfRecord } from './perf' // PERF
 
 /**
  * Feeds pdf.js document bytes on demand over IPC.
@@ -40,10 +41,14 @@ export class IpcRangeTransport extends PDFDataRangeTransport {
   requestDataRange(begin: number, end: number): void {
     if (this.aborted) return
     this.pending += 1
+    const startedAt = performance.now() // PERF
+    perfCount('io:requests') // PERF
 
     void window.api.pdfData
       .read(this.fileId, begin, end)
       .then((chunk) => {
+        perfRecord('io', performance.now() - startedAt, { bytes: chunk.byteLength, detail: `${begin}-${end}` }) // PERF
+        perfCount('io:bytes', chunk.byteLength) // PERF
         // The document may have been closed while this was in flight;
         // delivering then would push data into a torn-down worker.
         if (this.aborted) return

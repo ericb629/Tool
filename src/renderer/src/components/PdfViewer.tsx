@@ -15,6 +15,7 @@ import {
   type ZoomAnchor
 } from '../pdf/zoomAnchor'
 import { behaviorForButton, type InteractionConfig } from '../tools/interaction'
+import { perfCount, perfRecord } from '../pdf/perf' // PERF
 
 export type { InteractionConfig }
 import PdfPageCanvas, { type PageOverlayContext } from './PdfPageCanvas'
@@ -88,6 +89,8 @@ export default function PdfViewer({
     { left: number; top: number; width: number; height: number } | undefined
   >(undefined)
 
+  perfCount('react:PdfViewer renders') // PERF
+
   // ---- document ------------------------------------------------------
   useEffect(() => {
     let cancelled = false
@@ -99,6 +102,8 @@ export default function PdfViewer({
 
     let transport: IpcRangeTransport | undefined
     let task: ReturnType<typeof pdfjsLib.getDocument> | undefined
+
+    const openedAt = performance.now() // PERF
 
     void (async () => {
       let opened: { length: number; initialData: Uint8Array }
@@ -121,16 +126,26 @@ export default function PdfViewer({
         setStatus('error')
         setErrorMessage(message)
       })
-      task = pdfjsLib.getDocument({ range: transport, disableAutoFetch: true, disableStream: true })
+      // `pdfBug` turns on pdf.js's own StatTimer, which is what splits worker
+      // parse ("Page Request") from canvas raster ("Rendering"). Existing
+      // option in the installed build, not a new dependency. See pdf/perf.ts.
+      task = pdfjsLib.getDocument({
+        range: transport,
+        disableAutoFetch: true,
+        disableStream: true,
+        pdfBug: true // PERF
+      })
 
       try {
         const loaded = await task.promise
+        perfRecord('open:getDocument', performance.now() - openedAt) // PERF
         if (cancelled) return
         if (loaded.numPages === 0) {
           setStatus('empty')
           return
         }
         const sizes: BasePageSize[] = []
+        const sizeLoopAt = performance.now() // PERF
         for (let pageNumber = 1; pageNumber <= loaded.numPages; pageNumber++) {
           const page = await loaded.getPage(pageNumber)
           if (cancelled) return
@@ -141,6 +156,8 @@ export default function PdfViewer({
           page.cleanup()
         }
         if (cancelled) return
+        perfRecord('open:sizeLoop', performance.now() - sizeLoopAt, { detail: `${loaded.numPages} pages` }) // PERF
+        perfRecord('open:timeToReady', performance.now() - openedAt) // PERF
         setDoc(loaded)
         setBasePageSizes(sizes)
         setStatus('ready')
@@ -194,7 +211,19 @@ export default function PdfViewer({
   // translate, so horizontal scrolling works when a page is wider than the
   // viewport AND so cursor-anchored zoom can invert the mapping exactly.
   const layout = useMemo(
-    () => computePageLayout(basePageSizes, scale, containerSize.width, PAGE_GAP),
+    () => {
+      // PERF: counted here rather than inside computePageLayout so zoomAnchor.ts
+      // stays pure. It has exactly one production caller, so this is the same
+      // number. StrictMode double-invokes useMemo factories, so with it on this
+      // runs 2x per render pass and there are 2 render passes per wheel tick.
+      const at = performance.now() // PERF
+      const result = computePageLayout(basePageSizes, scale, containerSize.width, PAGE_GAP)
+      perfCount('layout:computePageLayout') // PERF
+      perfRecord('layout:computePageLayout', performance.now() - at, {
+        detail: `${basePageSizes.length} pages`
+      }) // PERF
+      return result
+    },
     [basePageSizes, scale, containerSize.width]
   )
 
@@ -247,6 +276,7 @@ export default function PdfViewer({
 
   // ---- visible range -------------------------------------------------
   const visibleRange = useMemo(() => {
+    perfCount('layout:visibleRange') // PERF
     if (!active) return { start: 1, end: 0 }
     if (layout.pages.length === 0) return { start: 1, end: 0 }
     const viewTop = scrollTop
@@ -289,6 +319,8 @@ export default function PdfViewer({
    * larger than the viewport, and without this it would rasterise in full.
    */
   const visibleRegions = useMemo(() => {
+    const regionsAt = performance.now() // PERF
+    perfCount('layout:visibleRegions') // PERF
     const regions = new Map<number, PageRegion>()
     if (containerSize.width === 0 || containerSize.height === 0) return regions
     const view: PageRegion = {
@@ -308,6 +340,7 @@ export default function PdfViewer({
         height: overlap.height
       })
     })
+    perfRecord('layout:visibleRegions', performance.now() - regionsAt) // PERF
     return regions
   }, [layout, scrollLeft, scrollTop, containerSize])
 
@@ -339,8 +372,15 @@ export default function PdfViewer({
   useEffect(() => {
     const element = scrollRef.current
     if (!element) return
+    // A "gesture" is a run of wheel events with no 200ms gap. Events-per-gesture
+    // is the number that confirms or kills the no-coalescing hypothesis.
+    let lastWheelAt = 0 // PERF
     const onWheel = (event: WheelEvent): void => {
       if (!event.ctrlKey) return // plain wheel keeps the container's native scroll
+      const now = performance.now() // PERF
+      if (now - lastWheelAt > 200) perfCount('zoom:wheel gestures') // PERF
+      lastWheelAt = now // PERF
+      perfCount('zoom:wheel events') // PERF
       event.preventDefault()
       const factor = Math.exp(-event.deltaY / 400)
       applyZoom(scaleRef.current * factor, event.clientX, event.clientY)
@@ -408,6 +448,7 @@ export default function PdfViewer({
     }
 
     if (g.behavior === 'pan') {
+      perfCount('pan:pointermove events') // PERF
       // Drive the scroll container itself, so panning and the virtualized
       // scroll are the same mechanism rather than two competing ones.
       element.scrollLeft = g.startScrollLeft - dx
