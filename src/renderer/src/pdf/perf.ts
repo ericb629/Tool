@@ -108,6 +108,12 @@ export function perfTrace(kind: string, detail: string): void {
   trace.push({ t: Math.round(performance.now() - t0), kind, detail })
 }
 
+/** Records a high-water mark rather than a total. */
+export function perfPeak(name: string, value: number): void {
+  if (!perfOn()) return
+  counters.set(name, Math.max(counters.get(name) ?? 0, value))
+}
+
 export function perfCount(name: string, by = 1): void {
   if (!perfOn()) return
   counters.set(name, (counters.get(name) ?? 0) + by)

@@ -149,7 +149,22 @@ pdf.js's wasm path regardless of scheduling. Sub-second on page 137 may be partl
 decoder speed that scheduling cannot close - worth establishing before treating
 1s as the target for every page rather than for normal sheets.
 
-### 2c. Range prefetch — LATENCY, and the addressable one
+### 2c. IPC transport overhead — MEASURED AND REJECTED
+
+The "3463ms of I/O" that motivated this was **an artifact of summing overlapping
+durations**. Peak concurrent range requests: **60**. Measured transport cost:
+
+  per message      0.225 ms   (a 1-byte read is 0.100 ms)
+  per byte         2.962 ms/MB   (~338 MB/s end to end)
+  196 req, 26.6MB  44 ms + 79 ms = ~123 ms
+
+So there is no 2.5s to reclaim. `rangeChunkSize` at 1MB would save ~40ms of the
+44ms message overhead; coalescing adjacent requests, batching per tick, and
+read-ahead buffers in main all save less than that. **Do not build them.**
+
+The far-jump cost is decode, not transport - page 137 alone is 5265ms.
+
+### 2d. Range prefetch — probably also not worth it
 This is the part of "floor-bound" that *is* fixable, and it should not be
 confused with the item above.
 
@@ -159,10 +174,10 @@ demand fetch**. A cold jump to page 138 issued **196 range requests for 34 MB,
 3463 ms of measured I/O**, each a full IPC round trip, with pdf.js parsing a
 little, discovering it needs more, and waiting again.
 
-Latency, not throughput — so it is hideable. Speculatively fetching the
-destination page's ranges on navigation, or widening the request granularity,
-would attack it without touching `disableAutoFetch`. **Untried.** The counters
-needed to evaluate it (`io`, `io:requests`, `io:bytes`) are already in place.
+Superseded by 2c: the 3463ms figure this rested on was a sum of overlapping
+durations, and the real transport cost is ~123ms. Prefetching bytes cannot beat
+that. **Untried and now low-value.** If revisited, note that `io` totals must be
+read against `io:peak in flight` (60) rather than taken as elapsed cost.
 
 ### 3. Decode-to-target-size — no mechanism yet
 Page 138's aerials decode at full resolution to fill a 250k-pixel preview at 35%

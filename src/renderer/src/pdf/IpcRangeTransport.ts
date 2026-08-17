@@ -1,5 +1,5 @@
 import { PDFDataRangeTransport } from 'pdfjs-dist'
-import { perfCount, perfNow, perfOn, perfRecord } from './perf' // PERF
+import { perfCount, perfNow, perfOn, perfPeak, perfRecord } from './perf' // PERF
 
 /**
  * Feeds pdf.js document bytes on demand over IPC.
@@ -45,6 +45,9 @@ export class IpcRangeTransport extends PDFDataRangeTransport {
     // stamp nor the range string may be built when recording is off.
     const startedAt = perfNow() // PERF
     perfCount('io:requests') // PERF
+    // PERF: concurrency, because a SUM of overlapping elapsed durations
+    // overstates cost exactly the way the raster timers do.
+    if (perfOn()) perfPeak('io:peak in flight', this.pending) // PERF
 
     void window.api.pdfData
       .read(this.fileId, begin, end)
