@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { PDFDocumentProxy, PDFPageProxy, PageViewport, RenderTask } from 'pdfjs-dist'
 import { deviceScaleFor, viewportForPage } from '../pdf/pageViewport'
+import { releasePage, retainPage } from '../pdf/pageRetention'
 import {
   TILE_BUFFER_PX,
   expandRegion,
@@ -139,6 +140,11 @@ export default function PdfPageCanvas({
     let cancelled = false
     let loaded: PDFPageProxy | undefined
     setRenderError(undefined)
+    // If this page was held after a previous unmount, stop counting it against
+    // the retention cap - it is live again. Its parse is still intact, which
+    // is the whole point: doc.getPage() below returns the same proxy from
+    // pdf.js's own cache, operator list and all.
+    releasePage(doc, pageNumber)
     const getPageAt = performance.now() // PERF
     void doc
       .getPage(pageNumber)
@@ -152,11 +158,15 @@ export default function PdfPageCanvas({
       })
     return () => {
       cancelled = true
-      // Drops the page's operator list, fonts and image resources. Scrolling a
-      // large sheet set without this retains every page ever visited, so
-      // virtualizing the canvases alone does not bound memory.
-      if (loaded) perfCount('page:cleanup calls') // PERF
-      loaded?.cleanup()
+      // Hand the page to the bounded retention cache instead of cleaning it up
+      // here. cleanup() drops the operator list, fonts and decoded images, and
+      // doing that the instant a page leaves the virtualized range made zoom
+      // re-parse pages it was about to need again - 23.4s of worker time over
+      // five zoom clicks on the Kincora set.
+      //
+      // This does NOT reintroduce unbounded retention: the cache holds at most
+      // RETAINED_PAGES entries and cleans up on eviction. See pdf/pageRetention.
+      if (loaded) retainPage(doc, pageNumber, loaded)
       setPage(undefined)
     }
   }, [doc, pageNumber])

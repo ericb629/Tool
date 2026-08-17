@@ -5,6 +5,7 @@ import { pdfjsLib } from '../pdf/pdfjs'
 import { IpcRangeTransport } from '../pdf/IpcRangeTransport'
 import { canvasToPdfPoint } from '../pdf/coordinates'
 import { viewportForPage } from '../pdf/pageViewport'
+import { flushDocumentPages } from '../pdf/pageRetention'
 import { intersectRegion, type PageRegion } from '../pdf/tiles'
 import { rectFromCorners, type UserSpaceRect } from '../pdf/hitTest'
 import {
@@ -102,6 +103,10 @@ export default function PdfViewer({
 
     let transport: IpcRangeTransport | undefined
     let task: ReturnType<typeof pdfjsLib.getDocument> | undefined
+    // Held so teardown can flush this document's retained pages. Closing a tab
+    // must release its worker resources; without this, pages held by the
+    // retention cache would outlive the document that owns them.
+    let openedDoc: PDFDocumentProxy | undefined
 
     const openedAt = performance.now() // PERF
 
@@ -138,6 +143,7 @@ export default function PdfViewer({
 
       try {
         const loaded = await task.promise
+        openedDoc = loaded
         perfRecord('open:getDocument', performance.now() - openedAt) // PERF
         if (cancelled) return
         if (loaded.numPages === 0) {
@@ -171,6 +177,9 @@ export default function PdfViewer({
 
     return () => {
       cancelled = true
+      // Before destroy(), so retained pages are cleaned up against a document
+      // that is still alive rather than left dangling.
+      if (openedDoc) flushDocumentPages(openedDoc)
       transport?.abort()
       void task?.destroy()
     }
