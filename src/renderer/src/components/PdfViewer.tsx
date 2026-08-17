@@ -17,7 +17,7 @@ import {
   type ZoomAnchor
 } from '../pdf/zoomAnchor'
 import { behaviorForButton, type InteractionConfig } from '../tools/interaction'
-import { perfCount, perfNow, perfOn, perfRecord } from '../pdf/perf' // PERF
+import { perfCount, perfNow, perfOn, perfRecord, perfTrace } from '../pdf/perf' // PERF
 
 export type { InteractionConfig }
 import PdfPageCanvas, { type PageOverlayContext } from './PdfPageCanvas'
@@ -331,13 +331,60 @@ export default function PdfViewer({
     setScrollLeft(element.scrollLeft)
   }, [layout, scale])
 
+  /**
+   * The scroll offset to reason about RIGHT NOW.
+   *
+   * A scale change re-runs render with the new layout while `scrollTop` still
+   * holds the value from the old one - the anchored scroll is not written until
+   * the layout effect below. Since every page box has moved, that stale offset
+   * points somewhere else entirely, and the pages it selects fully mount
+   * (getPage, preview, tiles) only to be destroyed three milliseconds later.
+   *
+   * Measured on one zoom click at page 23: the first pass resolved to
+   * "range 15-18 top 13523", then the anchored write landed and the second pass
+   * resolved to "range 22-24 top 19423". Four pages mounted and thrown away
+   * having never been on screen - and that churn is what destroyed cancelled
+   * previews (the white flash), 23.4s of parses, and any per-page state a zoom
+   * needs to survive.
+   *
+   * applyZoomAnchor is pure, so the answer is available during render. The DOM
+   * write stays in the layout effect; this only fixes WHICH PAGES MOUNT. Clamped
+   * the same way the browser will clamp it, or the derived value and the value
+   * that actually lands would disagree at the document ends.
+   */
+  const anchoredScroll = useMemo(() => {
+    const anchor = pendingAnchor.current
+    if (!anchor) return { top: scrollTop, left: scrollLeft }
+    const next = applyZoomAnchor(layout, scale, anchor)
+    if (!next) return { top: scrollTop, left: scrollLeft }
+    const maxTop = Math.max(0, layout.totalHeight - containerSize.height)
+    const maxLeft = Math.max(0, layout.contentWidth - containerSize.width)
+    return {
+      top: Math.max(0, Math.min(next.scrollTop, maxTop)),
+      left: Math.max(0, Math.min(next.scrollLeft, maxLeft))
+    }
+    // pendingAnchor is a ref, deliberately not a dep: it is set synchronously
+    // before the scale change that triggers this recompute.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [layout, scale, scrollTop, scrollLeft, containerSize.height, containerSize.width])
+
+  // PERF: trace range transitions so a remount can be attributed to a page
+  // genuinely leaving the range versus remounting while still inside it.
+  const lastRange = useRef('') // PERF
+  useEffect(() => { // PERF
+    const key = `${visibleRange.start}-${visibleRange.end}`
+    if (key === lastRange.current) return
+    lastRange.current = key
+    perfTrace('range', `${key} scale ${scale.toFixed(4)} top ${Math.round(scrollTop)}`)
+  })
+
   // ---- visible range -------------------------------------------------
   const visibleRange = useMemo(() => {
     perfCount('layout:visibleRange') // PERF
     if (!active) return { start: 1, end: 0 }
     if (layout.pages.length === 0) return { start: 1, end: 0 }
-    const viewTop = scrollTop
-    const viewBottom = scrollTop + (containerSize.height || 1)
+    const viewTop = anchoredScroll.top
+    const viewBottom = anchoredScroll.top + (containerSize.height || 1)
     let start = layout.pages.length
     let end = 1
     layout.pages.forEach((page, index) => {
@@ -354,17 +401,17 @@ export default function PdfViewer({
       start: Math.max(1, start - OVERSCAN_PAGES),
       end: Math.min(layout.pages.length, end + OVERSCAN_PAGES)
     }
-  }, [active, layout, scrollTop, containerSize.height, currentPage])
+  }, [active, layout, anchoredScroll.top, containerSize.height, currentPage])
 
   useEffect(() => {
     if (layout.pages.length === 0) return
-    const focusLine = scrollTop + (containerSize.height || 0) / 2
+    const focusLine = anchoredScroll.top + (containerSize.height || 0) / 2
     let candidate = 1
     layout.pages.forEach((page, index) => {
       if (page.top <= focusLine) candidate = index + 1
     })
     setCurrentPage(candidate)
-  }, [scrollTop, containerSize.height, layout])
+  }, [anchoredScroll.top, containerSize.height, layout])
 
   /**
    * The on-screen region of each page, in that page's own CSS pixels, keyed by
@@ -383,8 +430,8 @@ export default function PdfViewer({
     const regions = new Map<number, PageRegion>()
     if (containerSize.width === 0 || containerSize.height === 0) return regions
     const view: PageRegion = {
-      left: scrollLeft,
-      top: scrollTop,
+      left: anchoredScroll.left,
+      top: anchoredScroll.top,
       width: containerSize.width,
       height: containerSize.height
     }
@@ -401,7 +448,7 @@ export default function PdfViewer({
     })
     if (perfOn()) perfRecord('layout:visibleRegions', performance.now() - regionsAt) // PERF
     return regions
-  }, [layout, scrollLeft, scrollTop, containerSize])
+  }, [layout, anchoredScroll.left, anchoredScroll.top, containerSize])
 
   const handleScroll = useCallback(() => {
     const element = scrollRef.current

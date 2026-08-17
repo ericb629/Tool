@@ -16,9 +16,29 @@ future session can tell what was tried from what was merely considered.
 | Change | Effect |
 |---|---|
 | **`pdfData` buffer-pool fix** (`cf557fa`) | `readRange` returned a view over `Buffer.allocUnsafe`, whose backing ArrayBuffer is Node's shared 64 KB pool for any read under 32 KB. Structured clone sends the *backing buffer*, so the renderer received unrelated main-process memory. Not perf — a boundary leak. |
-| **Bounded page-retention LRU, cap 6** (`17c3464`) | Revisiting a page went from 8261 ms → **346 ms** (24×). Retention hits went 0/9 → 6/3. |
+| **Bounded page-retention LRU, cap 6** (`17c3464`) | Far-jump revisits: ~7.6 s → ~0 s. Retention hits went 0/9 → 6/3. **Re-measured after the remount fix — see the correction below.** |
 | **Preview budget 2M → 250k pixels** (`b6657b3`) | Previews were the largest single line item at 7569 ms over five zoom clicks. ~8× less fill. |
 | **Preview gated behind the first tile** (`2c05968`) | Preview and tiles were both replaying the whole operator list, concurrently, in front of the user. Preview total 6745 → **3477 ms**, two fewer operator-list builds, time-to-sharp 1923 → 1656 ms (−14%). |
+
+### Correction: the LRU's original headline was inflated by a separate bug
+
+The LRU was first measured as removing "23.4 s of destroyed parses over five
+zoom clicks", and revisits as 24× faster. The parse figure was real but its
+CAUSE was not the LRU's to own: pages were remounting on every zoom step because
+the visible range was computed against a stale scroll offset (see below). With
+that fixed, five zoom clicks produce **0 page mounts, 0 previews and 0 parses**,
+so the LRU now contributes nothing to zooming.
+
+What it still earns, re-measured on the same page 1 -> 138 -> 1 -> 138 scenario:
+
+  leg                  cap 3     cap 6
+  jump to end (cold)   ~9.1 s    ~7.6 s
+  jump back to start   ~1.5 s    ~0 s
+  jump to end again    ~7.6 s    ~0 s
+
+A far jump genuinely changes the page set, so the cache is doing real work
+there. Keep it, at cap 6, for that reason - not for the zoom number that
+originally justified it.
 
 ### The invariant that cost the most to find
 

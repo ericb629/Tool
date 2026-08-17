@@ -66,6 +66,7 @@ interface PerfGlobals {
   __PDF_PERF_RESET__?: () => void
   __PDF_PERF_TILETAX__?: (edge?: number) => Promise<string>
   __PDF_PERF_CANVASES__?: () => CanvasCensus
+  __PDF_PERF_TRACE__?: () => Array<{ t: number; kind: string; detail: string }>
 }
 
 const g = globalThis as typeof globalThis & PerfGlobals
@@ -91,6 +92,20 @@ export function perfRecord(kind: string, ms: number, extra?: Omit<Partial<PerfRe
   if (!perfOn()) return
   if (records.length >= RECORD_CAP) return
   records.push({ t: performance.now() - t0, phase, kind, ms, ...extra })
+}
+
+/**
+ * An ordered trace. The summary tables aggregate, and a remount question is
+ * about SEQUENCE - which page mounted, when, and what the visible range was at
+ * that moment. Capped so it cannot grow without bound.
+ */
+const TRACE_CAP = 4000
+const trace: Array<{ t: number; kind: string; detail: string }> = []
+
+export function perfTrace(kind: string, detail: string): void {
+  if (!perfOn()) return
+  if (trace.length >= TRACE_CAP) return
+  trace.push({ t: Math.round(performance.now() - t0), kind, detail })
 }
 
 export function perfCount(name: string, by = 1): void {
@@ -551,8 +566,11 @@ g.__PDF_PERF_DUMP__ = (): string => {
   return text
 }
 
+g.__PDF_PERF_TRACE__ = (): Array<{ t: number; kind: string; detail: string }> => trace
+
 g.__PDF_PERF_RESET__ = (): void => {
   records.length = 0
+  trace.length = 0
   counters.clear()
   offscreenPeak = offscreenLive
   phase = 'startup'

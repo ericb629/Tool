@@ -27,7 +27,8 @@ import {
   perfRegisterPage,
   perfStatsDrain,
   perfStatsMark,
-  perfSync
+  perfSync,
+  perfTrace
 } from '../pdf/perf'
 
 export interface PageOverlayContext {
@@ -184,6 +185,7 @@ export default function PdfPageCanvas({
     // the retention cap - it is live again. Its parse is still intact, which
     // is the whole point: doc.getPage() below returns the same proxy from
     // pdf.js's own cache, operator list and all.
+    perfTrace('mount', `p${pageNumber} scale ${scale.toFixed(4)}`) // PERF
     releasePage(doc, pageNumber)
     const getPageAt = perfNow() // PERF
     void doc
@@ -206,6 +208,7 @@ export default function PdfPageCanvas({
       //
       // This does NOT reintroduce unbounded retention: the cache holds at most
       // RETAINED_PAGES entries and cleans up on eviction. See pdf/pageRetention.
+      perfTrace('unmount', `p${pageNumber}`) // PERF
       if (loaded) retainPage(doc, pageNumber, loaded)
       setPage(undefined)
       setHasTile(false)
