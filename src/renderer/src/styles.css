@@ -977,3 +977,26 @@ body,
   color: #777;
   cursor: default;
 }
+
+/* Shown when pdf.js could not decode an image on a sheet. Deliberately loud:
+   the failure mode is a page that looks merely empty while still accepting
+   calibration and takeoff, which would measure against nothing. */
+.pdf-page__decode-warning {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  z-index: 3;
+  padding: 8px 12px;
+  background: #b3261e;
+  color: #fff;
+  font-size: 12px;
+  line-height: 1.4;
+  box-shadow: 0 2px 8px rgb(0 0 0 / 45%);
+  pointer-events: none;
+}
+
+/* The audit itself could not run - never render this as "fine". */
+.pdf-page__decode-warning--unknown {
+  background: #8a6d00;
+}

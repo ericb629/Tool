@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { PDFDocumentProxy, PDFPageProxy, PageViewport, RenderTask } from 'pdfjs-dist'
 import { deviceScaleFor, viewportForPage } from '../pdf/pageViewport'
 import { releasePage, retainPage } from '../pdf/pageRetention'
+import { auditDecodedImages, type DecodeAudit } from '../pdf/decodeAudit'
 import {
   TILE_BUFFER_PX,
   expandRegion,
@@ -160,6 +161,14 @@ export default function PdfPageCanvas({
    * so the sharp layer is not competing with it - see the preview effect.
    */
   const [hasTile, setHasTile] = useState(false)
+  /**
+   * Whether any image on this page failed to decode. pdf.js does not throw for
+   * that - it resolves the image to null and skips the draw - so a sheet whose
+   * content is missing is indistinguishable from an empty one unless we look.
+   * See pdf/decodeAudit.
+   */
+  const [decode, setDecode] = useState<DecodeAudit | undefined>(undefined)
+  const decodeChecked = useRef(false)
 
   // ---- page handle ----------------------------------------------------
   useEffect(() => {
@@ -195,6 +204,8 @@ export default function PdfPageCanvas({
       if (loaded) retainPage(doc, pageNumber, loaded)
       setPage(undefined)
       setHasTile(false)
+      setDecode(undefined)
+      decodeChecked.current = false
     }
   }, [doc, pageNumber])
 
@@ -226,6 +237,16 @@ export default function PdfPageCanvas({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [tileSignature]
   )
+
+  // Runs after a render resolves, when the operator list is complete. Once per
+  // page: the answer cannot change without the page being re-parsed.
+  const auditDecode = (loaded: PDFPageProxy): void => {
+    if (decodeChecked.current) return
+    const result = auditDecodedImages(loaded)
+    if (result.status === 'pending') return
+    decodeChecked.current = true
+    setDecode(result)
+  }
 
   // ---- preview: one small bitmap, never re-rendered on zoom ------------
   //
@@ -312,6 +333,7 @@ export default function PdfPageCanvas({
         perfOffscreenClose() // PERF
         perfCanvasSample() // PERF
         previewPainted.current = true
+        auditDecode(page)
       } catch (err) {
         // Guarded: the throw can predate the offscreen allocation (a bad
         // viewport), and an unguarded close would under-count the live gauge.
@@ -451,6 +473,7 @@ export default function PdfPageCanvas({
         // Opens the preview gate: the sharp layer is on screen for this page, so
         // its preview can render now without competing for animation frames.
         if (!cancelled) setHasTile(true)
+        auditDecode(page)
         perfPresent(blitAt, pageNumber) // PERF
         // PERF: sampled right after a tile is attached - the moment the live
         // canvas count is highest during a zoom.
@@ -552,6 +575,18 @@ export default function PdfPageCanvas({
         }}
       />
       {renderError ? <div className="pdf-page__error">Failed to render page {pageNumber}: {renderError}</div> : null}
+      {decode?.status === 'failed' ? (
+        <div className="pdf-page__decode-warning" role="alert">
+          <strong>Content missing.</strong> {decode.failed} of {decode.images} image
+          {decode.images === 1 ? '' : 's'} on this sheet could not be decoded. Do not measure from
+          this page.
+        </div>
+      ) : null}
+      {decode?.status === 'unknown' ? (
+        <div className="pdf-page__decode-warning pdf-page__decode-warning--unknown" role="alert">
+          <strong>Could not verify this sheet rendered completely.</strong> {decode.reason}
+        </div>
+      ) : null}
       <div className="pdf-page__label">{pageNumber}</div>
     </div>
   )
