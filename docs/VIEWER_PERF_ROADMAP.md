@@ -119,11 +119,14 @@ open, making `disableAutoFetch: true` the wrong model. Measured:
 bottleneck - disk is two orders of magnitude cheaper than the parse. Do not
 reach for `disableAutoFetch: false`.
 
-What IS real is that the app's I/O is IPC-bound rather than disk-bound: 196
-requests measured at **3463ms in the app** against **936ms of actual read()**
-in-process. That gap is ~200 round trips through preload and structured clone,
-which is what item 2 below should attack - fewer and larger requests, or serving
-ranges from a buffer held in MAIN (523MB there, not in every renderer tab).
+This section once closed by claiming the app's I/O was IPC-bound rather than
+disk-bound - 196 requests at **3463ms in the app** against **936ms of actual
+read()** - and pointed at fewer/larger requests or a buffer held in main. **That
+was wrong and is retracted; see 2c.** Both of those figures are sums of
+OVERLAPPING durations (peak 60 requests in flight), so neither is a cost and the
+~2.5s "gap" between them is not a quantity of anything. Sanity check the 936ms
+against the disk rate measured four lines above: 26.6MB at 2.1GB/s is ~13ms of
+actual read. Real transport cost is ~123ms.
 
 ### 2b. Parse cost is per-PAGE, not per-document
 
