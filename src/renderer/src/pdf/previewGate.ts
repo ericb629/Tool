@@ -97,3 +97,55 @@ export function shouldRenderPreview({
   if (!wantsTiles) return true
   return hasTile
 }
+
+/**
+ * Whether the foreground has landed, so held overscan previews may start.
+ *
+ * `painted` MUST mean "has content on screen right now", not "painted at some
+ * point this session". It was a session-history set once, added to on a first
+ * tile and never cleared - not on unmount, not on navigation, not on document
+ * change - so a page that had painted counted as painted forever, even after
+ * unmount destroyed its tiles and the retention LRU evicted its parse. The hold
+ * therefore engaged on a page's FIRST visit and never again: on the
+ * 1 -> 138 -> 1 -> 138 scenario it was active for leg 1 only, and any
+ * repeat-jump measurement of it was measuring nothing.
+ *
+ * Kept pure and here rather than inline in the viewer because the emptiness
+ * case below is the kind of thing that reads as an oversight and gets
+ * "tidied up" into a bug.
+ */
+export function isForegroundReady(
+  visiblePages: Iterable<number>,
+  paintedPages: ReadonlySet<number>
+): boolean {
+  let anyVisible = false
+  for (const pageNumber of visiblePages) {
+    anyVisible = true
+    if (paintedPages.has(pageNumber)) return true
+  }
+  // Nothing visible yet means nothing to wait for. Returning false here would
+  // hold every overscan preview indefinitely on an empty or not-yet-measured
+  // viewport.
+  return !anyVisible
+}
+
+/**
+ * Whether a page may accept pointer input - placing points, calibrating,
+ * starting a takeoff.
+ *
+ * NOT a cosmetic guard. The overlay canvas is live as soon as the page proxy
+ * resolves, because it is sized from the set of tiles the view WANTS rather
+ * than the set that has rendered. Between navigation and the first tile the
+ * sheet is therefore white (`.pdf-page` is `background: #fff`) and fully
+ * interactive, which on a cold exhibit sheet is several seconds. A white sheet
+ * is indistinguishable from a genuinely empty one, so a calibration or a
+ * takeoff placed there measures against nothing and looks completely normal
+ * afterwards - the same failure class as the JBIG2 decode bug, which at least
+ * had a banner.
+ *
+ * The preview cannot close that window: it is gated behind the same first tile
+ * and pays the same parse, so it has never once arrived earlier.
+ */
+export function canAcceptPointerInput(hasTile: boolean, hasPreview: boolean): boolean {
+  return hasTile || hasPreview
+}

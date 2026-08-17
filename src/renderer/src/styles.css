@@ -524,6 +524,39 @@ body,
   overflow: hidden;
 }
 
+/* Shown until this page has ANY content on screen - a preview or a tile.
+   `.pdf-page` is white, and a white sheet is indistinguishable from a
+   genuinely empty one, so a page that has not rendered has to say so rather
+   than looking like a sheet with nothing on it. Deliberately hatched rather
+   than a flat tone: nothing in a real drawing looks like this. Pointer input
+   is refused for the same window - see canAcceptPointerInput. */
+.pdf-page__placeholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: #e8e8e8;
+  background-image: repeating-linear-gradient(
+    45deg,
+    transparent 0 10px,
+    rgba(0, 0, 0, 0.05) 10px 20px
+  );
+}
+
+.pdf-page__placeholder-label {
+  padding: 6px 12px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.85);
+  color: #555;
+  font-size: 13px;
+  /* The page box can be smaller than this text at low zoom. */
+  max-width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
 .pdf-page__canvas {
   position: absolute;
   top: 0;

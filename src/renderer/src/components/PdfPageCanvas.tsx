@@ -3,7 +3,7 @@ import type { PDFDocumentProxy, PDFPageProxy, PageViewport, RenderTask } from 'p
 import { deviceScaleFor, viewportForPage } from '../pdf/pageViewport'
 import { releasePage, retainPage } from '../pdf/pageRetention'
 import { auditDecodedImages, type DecodeAudit } from '../pdf/decodeAudit'
-import { PREVIEW_DEADLINE_MS, shouldRenderPreview } from '../pdf/previewGate'
+import { PREVIEW_DEADLINE_MS, canAcceptPointerInput, shouldRenderPreview } from '../pdf/previewGate'
 import {
   TILE_BUFFER_PX,
   expandRegion,
@@ -119,8 +119,16 @@ interface PdfPageCanvasProps {
    * immediately. See pdf/previewGate.
    */
   holdPreview?: boolean
-  /** Reports the first painted tile, so the viewer knows the foreground landed. */
-  onFirstTile?: (pageNumber: number) => void
+  /**
+   * Reports whether this page currently has a tile on screen, so the viewer
+   * knows whether the foreground has landed.
+   *
+   * BOTH EDGES, not just the first tile. The viewer's set was previously
+   * add-only, so a page that had painted once counted as painted for the rest
+   * of the session and the foreground hold quietly stopped working after a
+   * page's first visit. See isForegroundReady in pdf/previewGate.
+   */
+  onPaintedChange?: (pageNumber: number, painted: boolean) => void
 }
 
 /**
@@ -161,11 +169,17 @@ export default function PdfPageCanvas({
   onViewportReady,
   overlayRevision = 0,
   holdPreview = false,
-  onFirstTile
+  onPaintedChange
 }: PdfPageCanvasProps) {
   const previewCanvasRef = useRef<HTMLCanvasElement>(null)
   const tileLayerRef = useRef<HTMLDivElement>(null)
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null)
+
+  // Held in a ref so an unstable callback from the parent cannot re-run the
+  // page-handle effect below, which would re-fetch the page on every viewer
+  // render. The effect's deps stay [doc, pageNumber], which is what they mean.
+  const paintedChangeRef = useRef(onPaintedChange)
+  paintedChangeRef.current = onPaintedChange
 
   const [page, setPage] = useState<PDFPageProxy | undefined>(undefined)
   const [renderError, setRenderError] = useState<string | undefined>(undefined)
@@ -174,6 +188,15 @@ export default function PdfPageCanvas({
    * so the sharp layer is not competing with it - see the preview effect.
    */
   const [hasTile, setHasTile] = useState(false)
+  /**
+   * Whether a preview bitmap has been blitted onto the visible canvas.
+   *
+   * State, not just the `previewPainted` ref below: this drives what is on
+   * screen and whether the page accepts pointer input, and a ref does not
+   * re-render. Together with hasTile it answers "is there ANY content on this
+   * page yet" - see canAcceptPointerInput in pdf/previewGate.
+   */
+  const [hasPreview, setHasPreview] = useState(false)
   /** A tile render failed with something other than a cancellation. */
   const [tilesFailed, setTilesFailed] = useState(false)
   /** PREVIEW_DEADLINE_MS elapsed without a first tile. See pdf/previewGate. */
@@ -221,8 +244,13 @@ export default function PdfPageCanvas({
       // RETAINED_PAGES entries and cleans up on eviction. See pdf/pageRetention.
       perfTrace('unmount', `p${pageNumber}`) // PERF
       if (loaded) retainPage(doc, pageNumber, loaded)
+      // The tiles are destroyed below, so this page no longer has anything on
+      // screen. Telling the viewer is what keeps its painted set a statement
+      // about the present rather than a session-long high-water mark.
+      paintedChangeRef.current?.(pageNumber, false)
       setPage(undefined)
       setHasTile(false)
+      setHasPreview(false)
       setTilesFailed(false)
       setPreviewDeadlineReached(false)
       setDecode(undefined)
@@ -314,6 +342,7 @@ export default function PdfPageCanvas({
   const previewPainted = useRef(false)
   useEffect(() => {
     previewPainted.current = false
+    setHasPreview(false)
   }, [page, rotation])
 
   useEffect(() => {
@@ -376,6 +405,7 @@ export default function PdfPageCanvas({
         perfOffscreenClose() // PERF
         perfCanvasSample() // PERF
         previewPainted.current = true
+        setHasPreview(true)
         auditDecode(page)
       } catch (err) {
         // Guarded: the throw can predate the offscreen allocation (a bad
@@ -438,6 +468,7 @@ export default function PdfPageCanvas({
 
     let cancelled = false
     let task: RenderTask | undefined
+    const tileSetAt = perfNow() // PERF
 
     void (async () => {
       for (const [key, tile] of wanted) {
@@ -518,13 +549,25 @@ export default function PdfPageCanvas({
         // its preview can render now without competing for animation frames.
         if (!cancelled) {
           setHasTile(true)
-          onFirstTile?.(pageNumber)
+          paintedChangeRef.current?.(pageNumber, true)
         }
         auditDecode(page)
         perfPresent(blitAt, pageNumber) // PERF
         // PERF: sampled right after a tile is attached - the moment the live
         // canvas count is highest during a zoom.
         perfCanvasSample() // PERF
+      }
+      // PERF: the whole wanted set is on screen. The page's FIRST tile is what
+      // currently releases held overscan previews, but a destination page wants
+      // 2-6 tiles, so this is the other end of the window in which the page the
+      // user navigated to is still rendering. Pairing the two says whether the
+      // neighbour's parse lands inside it.
+      if (!cancelled && perfOn()) { // PERF
+        perfRecord('tiles:set complete', performance.now() - tileSetAt, {
+          page: pageNumber,
+          detail: `${wanted.size} tiles`
+        })
+        perfTrace('tiles complete', `p${pageNumber} ${wanted.size} tiles`)
       }
     })()
 
@@ -603,8 +646,20 @@ export default function PdfPageCanvas({
     return () => onViewportReady(pageNumber, undefined)
   }, [onViewportReady, pageNumber, viewport, overlayRegion])
 
+  // Nothing has been drawn for this page yet. Both a visible placeholder and a
+  // refusal to accept points hang off this - see canAcceptPointerInput.
+  const painted = canAcceptPointerInput(hasTile, hasPreview)
+
   return (
     <div className="pdf-page" style={{ width, height }} data-page-number={pageNumber}>
+      {/* Under every render layer, so the first thing that paints covers it.
+          Exists because `.pdf-page` is white and a white sheet is
+          indistinguishable from an empty one. */}
+      {!painted ? (
+        <div className="pdf-page__placeholder">
+          <span className="pdf-page__placeholder-label">Rendering page {pageNumber}…</span>
+        </div>
+      ) : null}
       <canvas ref={previewCanvasRef} className="pdf-page__canvas pdf-page__canvas--preview" />
       <div ref={tileLayerRef} className="pdf-page__tiles" />
       <canvas
@@ -613,6 +668,11 @@ export default function PdfPageCanvas({
         onPointerDown={(event) => {
           const overlay = overlayCanvasRef.current
           if (!overlay || !viewport || !overlayRegion || !onPointerDown) return
+          // Refuse points on a sheet with no content on screen. The overlay is
+          // live as soon as the page proxy resolves - it is sized from the
+          // tiles the view WANTS - so without this a cold exhibit sheet accepts
+          // calibration and takeoff for several seconds while still blank.
+          if (!painted) return
           onPointerDown(event, {
             pageNumber,
             viewport,

@@ -2,6 +2,8 @@ import { strict as assert } from 'node:assert'
 import { describe, it } from 'vitest'
 import {
   PREVIEW_DEADLINE_MS,
+  canAcceptPointerInput,
+  isForegroundReady,
   shouldRenderPreview,
   type PreviewGateState
 } from '../src/renderer/src/pdf/previewGate'
@@ -88,6 +90,50 @@ describe('preview gate', () => {
         }
       }
     }
+  })
+
+  it('holds until a page the user is looking at has painted', () => {
+    assert.equal(isForegroundReady([138], new Set()), false)
+    assert.equal(isForegroundReady([138], new Set([138])), true)
+  })
+
+  it('does not wait when nothing is visible', () => {
+    // An empty or not-yet-measured viewport has no foreground to wait for.
+    // Returning false here would hold every overscan preview indefinitely.
+    assert.equal(isForegroundReady([], new Set()), true)
+  })
+
+  it('stops counting a page that painted and then unmounted', () => {
+    // THE BUG THIS PINS. The viewer's painted set was add-only, so a page that
+    // had painted once counted as painted for the rest of the session - even
+    // after unmount destroyed its tiles and the retention LRU evicted its
+    // parse. The hold engaged on a page's FIRST visit and never again, so on
+    // 1 -> 138 -> 1 -> 138 it was doing nothing from leg 2 onwards, and any
+    // repeat-jump measurement of it was measuring a gate that was not running.
+    const painted = new Set([138])
+    assert.equal(isForegroundReady([138], painted), true)
+    painted.delete(138) // what unmount now reports
+    assert.equal(isForegroundReady([138], painted), false)
+  })
+
+  it('counts any visible page, not one particular one', () => {
+    // Several pages are genuinely visible on a portrait viewport, and the
+    // foreground has landed as soon as ANY of them has content.
+    assert.equal(isForegroundReady([100, 101, 102], new Set([101])), true)
+    assert.equal(isForegroundReady([100, 101, 102], new Set([7])), false)
+  })
+
+  it('refuses pointer input until the page has content on screen', () => {
+    // A white sheet is indistinguishable from an empty one, and the overlay is
+    // live from the moment the page proxy resolves - so without this a cold
+    // exhibit sheet accepts calibration and takeoff for several seconds while
+    // showing nothing. Points placed there measure against nothing and look
+    // entirely normal afterwards.
+    assert.equal(canAcceptPointerInput(false, false), false)
+    // Either layer landing is enough: both prove content is on screen.
+    assert.equal(canAcceptPointerInput(true, false), true)
+    assert.equal(canAcceptPointerInput(false, true), true)
+    assert.equal(canAcceptPointerInput(true, true), true)
   })
 
   it('sets a deadline that cannot fire on a page which is merely slow', () => {

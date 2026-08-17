@@ -16,6 +16,7 @@ import {
   type BasePageSize,
   type ZoomAnchor
 } from '../pdf/zoomAnchor'
+import { isForegroundReady } from '../pdf/previewGate'
 import { behaviorForButton, type InteractionConfig } from '../tools/interaction'
 import { perfCount, perfNow, perfOn, perfRecord, perfTrace } from '../pdf/perf' // PERF
 
@@ -101,6 +102,9 @@ export default function PdfViewer({
     setDoc(undefined)
     setBasePageSizes([])
     setCurrentPage(1)
+    // Page numbers mean nothing across documents, so carrying these over would
+    // report the new document's page 1 as already on screen.
+    setPaintedPages(new Set())
 
     let transport: IpcRangeTransport | undefined
     let task: ReturnType<typeof pdfjsLib.getDocument> | undefined
@@ -623,29 +627,55 @@ export default function PdfViewer({
   }
 
   /**
-   * Pages that have painted a tile since the last navigation.
+   * Pages with a tile on screen RIGHT NOW.
    *
    * Overscan pages rasterise nothing, so their preview would start immediately
    * and build a full operator list while the destination page is still being
    * parsed - in a single-threaded worker. Measured: a jump to page 138 parsed
    * page 137 (5265ms) as well as page 138 (2429ms), and only 138 was on screen.
    * So overscan previews wait until something the user is looking at has landed.
+   *
+   * Membership is added AND removed - a page reports false when it unmounts and
+   * its tiles are destroyed. As an add-only set this was a session-long record
+   * of "has ever painted", which made the hold engage on a page's first visit
+   * and never again. See isForegroundReady in pdf/previewGate.
    */
   const [paintedPages, setPaintedPages] = useState<ReadonlySet<number>>(new Set())
-  const handleFirstTile = useCallback((pageNumber: number) => {
-    setPaintedPages((prev) => (prev.has(pageNumber) ? prev : new Set(prev).add(pageNumber)))
+  const handlePaintedChange = useCallback((pageNumber: number, painted: boolean) => {
+    setPaintedPages((prev) => {
+      if (prev.has(pageNumber) === painted) return prev
+      const next = new Set(prev)
+      if (painted) next.add(pageNumber)
+      else next.delete(pageNumber)
+      return next
+    })
   }, [])
 
   // A visible page is one with an on-screen region; those are the foreground.
-  const foregroundReady = useMemo(() => {
-    let anyVisible = false
-    for (const pageNumber of visibleRegions.keys()) {
-      anyVisible = true
-      if (paintedPages.has(pageNumber)) return true
-    }
-    // Nothing visible yet means nothing to wait for.
-    return !anyVisible
-  }, [visibleRegions, paintedPages])
+  const foregroundReady = useMemo(
+    () => isForegroundReady(visibleRegions.keys(), paintedPages),
+    [visibleRegions, paintedPages]
+  )
+
+  // PERF: the moment held overscan previews are released, and by which page.
+  // The other end of that window is `tiles complete` for the same page.
+  // Seeded to the value isForegroundReady returns for an empty viewport, so the
+  // first render is not reported as a transition.
+  const lastForeground = useRef(true) // PERF
+  useEffect(() => { // PERF
+    if (foregroundReady === lastForeground.current) return
+    lastForeground.current = foregroundReady
+    if (!perfOn()) return
+    const painted = [...visibleRegions.keys()].filter((n) => paintedPages.has(n))
+    perfTrace(
+      'foreground',
+      !foregroundReady
+        ? `holding, waiting on p${[...visibleRegions.keys()].join(',')}`
+        : painted.length
+          ? `released by p${painted.join(',')}`
+          : 'released - no visible pages to wait for'
+    )
+  })
 
   const registerPage = useCallback((pageNumber: number, context: PageOverlayContext | undefined) => {
     if (context) pageContexts.current.set(pageNumber, context)
@@ -756,7 +786,7 @@ export default function PdfViewer({
                     onViewportReady={registerPage}
                     overlayRevision={overlayRevision}
                     holdPreview={!foregroundReady && !visibleRegions.has(pageNumber)}
-                    onFirstTile={handleFirstTile}
+                    onPaintedChange={handlePaintedChange}
                   />
                 </div>
               )
