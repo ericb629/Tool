@@ -167,20 +167,74 @@ read-ahead buffers in main all save less than that. **Do not build them.**
 
 The far-jump cost is decode, not transport - page 137 alone is 5265ms.
 
+**On the payload figure.** Two numbers were recorded for the same 196-request
+jump: **34 MB** in the original 2d entry and **26.6 MB** here. Only one can be
+right and the raw dumps were not kept, so this is settled by provenance rather
+than re-derivation: 26.6 MB came from the controlled payload sweep, at counter
+precision, after the concurrency error was understood; 34 MB is a round
+restatement written in the same paragraph as the discredited 3463ms. **26.6 MB
+is the figure to quote.** The conclusion does not turn on it either way - at
+34 MB the total would be 44 + 101 = ~145ms. `io:bytes` is authoritative if
+anyone wants to close it properly: enable `__PDF_PERF__`, open the set, jump
+cold to 138, and read `io:bytes` next to `io:requests` and `io:peak in flight`.
+
 ### 2d. Range prefetch — probably also not worth it
 This is the part of "floor-bound" that *is* fixable, and it should not be
 confused with the item above.
 
 `disableAutoFetch: true` (load-bearing: without it pdf.js walks the whole
 document and the memory win evaporates) means every byte is a **sequential
-demand fetch**. A cold jump to page 138 issued **196 range requests for 34 MB,
-3463 ms of measured I/O**, each a full IPC round trip, with pdf.js parsing a
+demand fetch**. A cold jump to page 138 issued **196 range requests for 26.6 MB**
+(see 2c on that figure), each a full IPC round trip, with pdf.js parsing a
 little, discovering it needs more, and waiting again.
 
 Superseded by 2c: the 3463ms figure this rested on was a sum of overlapping
 durations, and the real transport cost is ~123ms. Prefetching bytes cannot beat
 that. **Untried and now low-value.** If revisited, note that `io` totals must be
 read against `io:peak in flight` (60) rather than taken as elapsed cost.
+
+### 2e. Primary-page priority — the co-visibility premise was FALSE
+
+Commit 116e383 closed with: page 138 did not fall to ~2.4s because "at fit-width
+two pages are genuinely visible, so 137 and 138 are both foreground and both
+still parse on the critical path", and proposed prioritising the primary page
+over other VISIBLE pages, trading a longer blank on the neighbour. The cheap
+version of that - demote a page covering less than some fraction of the viewport
+to the overscan tier, reusing the existing two-tier gate - was specced and then
+checked against the geometry before being built. **It has nothing to bite on.**
+
+Real geometry, read off the file: all 138 pages are **2592x1728** after `/Rotate`
+(94 at 270, 44 at 90). Uniform, so `referenceSize` never changes and the
+fit-width scale does not move when the current page does. A 3:2 page at fit width
+is `availableWidth / 1.5` tall - taller than any landscape viewport - so:
+
+  viewport      scale     page box      visible after a jump to 138
+  1280x700     0.4846   1256x837       p138 = 98.1%   (2 tiles)
+  1600x820     0.6080   1576x1051      p138 = 98.5%   (4 tiles)
+  1920x980     0.7315   1896x1264      p138 = 98.8%   (4 tiles)
+  2560x1300    0.9784   2536x1691      p138 = 99.1%   (6 tiles)
+
+**One visible page, at ~98%.** Page 137 has no visible region at all: it is
+already overscan and already held. A coverage threshold under 98% is inert and
+one over it would defer the page the user navigated to. A second page appears
+only on a viewport narrower than the 3:2 page aspect - a portrait window.
+Pinned in `test/visiblePages.test.ts`, cheap to re-run on other sheet geometry.
+
+**What is actually left, and it is a different mechanism.** `foregroundReady`
+flips as soon as the destination paints its **first** tile - but the destination
+wants 2-6 tiles. So the held neighbour's preview is released, and its 5265ms
+parse starts, while tiles 2..N of the page being looked at are still rendering.
+That fits the shape of the residual: 138 reaches sharp in 6349ms while its own
+parse is 2429ms.
+
+The candidate fix is to release the hold when the destination's **current tile
+set is complete** rather than on its first tile. No new tier, no coverage
+threshold, no blank-neighbour trade - the neighbour is off-screen either way.
+It needs the same two escape hatches as the existing gate (tile failure and the
+deadline), because "all tiles" is a harder condition to reach than "any tile"
+and a page must never wait forever. **Unbuilt and unmeasured**; the hypothesis
+above is inferred from tile counts, not observed, so instrument the release
+point before writing the change.
 
 ### 3. Decode-to-target-size — no mechanism yet
 Page 138's aerials decode at full resolution to fill a 250k-pixel preview at 35%
