@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { PDFDocumentProxy } from 'pdfjs-dist'
 import { ChevronFirst, ChevronLast, ChevronLeft, ChevronRight } from 'lucide-react'
-import { pdfjsLib } from '../pdf/pdfjs'
+import { PDF_CMAP_URL, PDF_STANDARD_FONT_URL, PDF_WASM_URL, pdfjsLib } from '../pdf/pdfjs'
 import { IpcRangeTransport } from '../pdf/IpcRangeTransport'
 import { canvasToPdfPoint } from '../pdf/coordinates'
 import { viewportForPage } from '../pdf/pageViewport'
@@ -142,6 +142,13 @@ export default function PdfViewer({
         range: transport,
         disableAutoFetch: true,
         disableStream: true,
+        // Runtime assets. Without wasmUrl, JBIG2/JPEG2000 images fail to decode
+        // and pdf.js WARNS rather than throwing - the page renders without its
+        // scan and looks merely empty. See pdf/pdfjs.ts.
+        wasmUrl: PDF_WASM_URL,
+        cMapUrl: PDF_CMAP_URL,
+        cMapPacked: true,
+        standardFontDataUrl: PDF_STANDARD_FONT_URL,
         pdfBug: perfOn() // PERF
       })
 
