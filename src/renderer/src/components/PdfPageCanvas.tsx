@@ -3,6 +3,7 @@ import type { PDFDocumentProxy, PDFPageProxy, PageViewport, RenderTask } from 'p
 import { deviceScaleFor, viewportForPage } from '../pdf/pageViewport'
 import { releasePage, retainPage } from '../pdf/pageRetention'
 import { auditDecodedImages, type DecodeAudit } from '../pdf/decodeAudit'
+import { PREVIEW_DEADLINE_MS, shouldRenderPreview } from '../pdf/previewGate'
 import {
   TILE_BUFFER_PX,
   expandRegion,
@@ -161,6 +162,10 @@ export default function PdfPageCanvas({
    * so the sharp layer is not competing with it - see the preview effect.
    */
   const [hasTile, setHasTile] = useState(false)
+  /** A tile render failed with something other than a cancellation. */
+  const [tilesFailed, setTilesFailed] = useState(false)
+  /** PREVIEW_DEADLINE_MS elapsed without a first tile. See pdf/previewGate. */
+  const [previewDeadlineReached, setPreviewDeadlineReached] = useState(false)
   /**
    * Whether any image on this page failed to decode. pdf.js does not throw for
    * that - it resolves the image to null and skips the draw - so a sheet whose
@@ -204,6 +209,8 @@ export default function PdfPageCanvas({
       if (loaded) retainPage(doc, pageNumber, loaded)
       setPage(undefined)
       setHasTile(false)
+      setTilesFailed(false)
+      setPreviewDeadlineReached(false)
       setDecode(undefined)
       decodeChecked.current = false
     }
@@ -277,6 +284,15 @@ export default function PdfPageCanvas({
 
   // Set once a preview has been painted for this page+rotation, so landing a
   // tile later cannot trigger a second one. "Rendered once per page" stays true.
+  // Bounds how long the preview waits for a first tile. Without this a page
+  // whose tile never lands stays blank forever - see pdf/previewGate for the
+  // three ways that happens.
+  useEffect(() => {
+    if (!page || !wantsTiles || hasTile || tilesFailed || previewDeadlineReached) return
+    const timer = window.setTimeout(() => setPreviewDeadlineReached(true), PREVIEW_DEADLINE_MS)
+    return () => window.clearTimeout(timer)
+  }, [page, wantsTiles, hasTile, tilesFailed, previewDeadlineReached])
+
   const previewPainted = useRef(false)
   useEffect(() => {
     previewPainted.current = false
@@ -286,7 +302,7 @@ export default function PdfPageCanvas({
     if (!page) return
     if (previewPainted.current) return
     // Waiting on the sharp layer. When the first tile lands this effect re-runs.
-    if (wantsTiles && !hasTile) return
+    if (!shouldRenderPreview({ wantsTiles, hasTile, tilesFailed, deadlineReached: previewDeadlineReached })) return
     let cancelled = false
     let task: RenderTask | undefined
 
@@ -352,7 +368,7 @@ export default function PdfPageCanvas({
     }
     // hasTile/wantsTiles are the gate. Booleans, not the `visible` object, so a
     // pan that only changes the visible RECTANGLE does not re-run this.
-  }, [page, rotation, wantsTiles, hasTile])
+  }, [page, rotation, wantsTiles, hasTile, tilesFailed, previewDeadlineReached])
 
   // The preview is stretched to whatever the page box currently is, so a zoom
   // never leaves it at the wrong size while tiles are still rendering.
@@ -444,6 +460,7 @@ export default function PdfPageCanvas({
             if (perfOn()) perfRecord('raster:tile wasted', performance.now() - rasterAt, { page: pageNumber }) // PERF
             return
           }
+          setTilesFailed(true)
           setRenderError(err instanceof Error ? err.message : String(err))
           return
         }
