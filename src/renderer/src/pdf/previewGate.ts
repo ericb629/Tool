@@ -29,16 +29,31 @@
 /**
  * How long the preview waits for a first tile before rendering anyway.
  *
- * 2500ms, chosen against measurements rather than taste. A dense plan sheet
- * reaches ALL tiles stable in 1654-1960ms, and the FIRST tile well before that,
- * so this rarely fires in normal use and the ordering benefit is kept. A
- * photo-collage exhibit sheet takes ~8400ms cold, so there the deadline fires
- * and the user gets a blurry page at 2.5s instead of a blank one for 8.4s.
+ * This is a BACKSTOP for the cases where a tile is never coming - everything
+ * cancelled, or a stall - not a promise to show something quickly. It is
+ * deliberately long, and 2500ms was measured to be wrong:
  *
- * The cost is real and deliberately accepted: on the slowest sheets the preview
- * competes with tiles again for the remainder. Blurry-then-sharp beats blank.
+ *   far jump to page 138 (photo collage), time to sharp
+ *     deadline off / gated    8373, 8442, 8261 ms
+ *     deadline 2500ms         9021 ms
+ *
+ * The preview on that sheet takes 6195ms to render, so firing at 2.5s put it on
+ * screen at ~8.7s - the same moment the tiles arrived - while adding ~6s of
+ * competing raster. It delivered nothing sooner and cost ~600ms. The idea that
+ * "blurry at 2.5s beats blank at 8.4s" was simply false: the user never saw
+ * blurry at 2.5s.
+ *
+ * SCALING IT WITH PAGE COST IS ALSO WRONG, and the data says why: the obvious
+ * proxy is operator count, and it is ANTI-correlated with render cost on the
+ * pages that are slow. Page 138 is 11.4k operators and ~8.4s; page 23 is 51k
+ * operators and ~1.7s. Scaling on op count would shorten the deadline exactly
+ * where it does the most damage.
+ *
+ * So: long enough never to fire on a page that is merely slow, short enough
+ * that a genuinely stuck page is not blank forever. A page that is stuck is not
+ * rendering anything anyway, so waiting longer there costs nothing.
  */
-export const PREVIEW_DEADLINE_MS = 2500
+export const PREVIEW_DEADLINE_MS = 12_000
 
 export interface PreviewGateState {
   /** This page has a visible region, so it is going to rasterise tiles. */

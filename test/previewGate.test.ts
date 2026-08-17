@@ -69,11 +69,17 @@ describe('preview gate', () => {
     }
   })
 
-  it('sets a deadline above a normal first tile and below the slowest sheet', () => {
-    // Measured: plan sheets reach ALL tiles stable in 1654-1960ms and the first
-    // tile sooner; photo-collage sheets take ~8400ms cold. The deadline has to
-    // sit between those or it either fires constantly or bounds nothing.
-    assert.ok(PREVIEW_DEADLINE_MS > 1960, `${PREVIEW_DEADLINE_MS}ms would fire on normal sheets`)
-    assert.ok(PREVIEW_DEADLINE_MS < 8400, `${PREVIEW_DEADLINE_MS}ms would not bound a slow sheet`)
+  it('sets a deadline that cannot fire on a page which is merely slow', () => {
+    // Measured: the slowest real sheet (a photo collage, cold) reaches sharp in
+    // ~8400ms, and its own preview takes 6195ms to render. A deadline below that
+    // fires without helping - the preview lands no earlier than the tiles - and
+    // costs ~600ms of competing raster. The deadline exists for pages where a
+    // tile is never coming at all, so it must sit clear of merely-slow.
+    assert.ok(
+      PREVIEW_DEADLINE_MS > 8400,
+      `${PREVIEW_DEADLINE_MS}ms fires on sheets that are slow but working`
+    )
+    // And still bounded: a stuck page must not be blank indefinitely.
+    assert.ok(PREVIEW_DEADLINE_MS <= 30_000, `${PREVIEW_DEADLINE_MS}ms is not a bound`)
   })
 })
