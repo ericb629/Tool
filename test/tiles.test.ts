@@ -5,6 +5,7 @@ import {
   TILE_PX,
   expandRegion,
   intersectRegion,
+  scaleTileRect,
   tileKey,
   tileSetBounds,
   tilesCovering,
@@ -180,6 +181,44 @@ describe('tile grid', () => {
     assert.equal(at(4008), base, 'an 8px pan changed the tile set')
     assert.equal(at(4040), base, 'a 40px pan changed the tile set')
     assert.notEqual(at(4000 + TILE_PX * 2), base, 'a large pan should change the tile set')
+  })
+
+  it('re-places a tile from a previous zoom onto the current page box', () => {
+    // A zoom step invalidates every tile key at once. The outgoing generation
+    // is kept on screen underneath, stretched, until the new one lands -
+    // otherwise the only thing left is the 250k-pixel preview over the whole
+    // page, and the sheet reads as flashing between sharp and blurred.
+    const tile = { col: 1, row: 2, left: 1024, top: 2048, width: 1024, height: 800 }
+
+    // Tile geometry and the page box are both proportional to scale, so the
+    // ratio between the two scales places it exactly.
+    const zoomedIn = scaleTileRect(tile, 2)
+    assert.deepEqual(zoomedIn, { left: 2048, top: 4096, width: 2048, height: 1600 })
+
+    const zoomedOut = scaleTileRect(tile, 0.5)
+    assert.deepEqual(zoomedOut, { left: 512, top: 1024, width: 512, height: 400 })
+
+    // Same scale must be identity, or a re-run of the tile effect that is not a
+    // zoom would nudge the layer.
+    assert.deepEqual(scaleTileRect(tile, 1), { left: 1024, top: 2048, width: 1024, height: 800 })
+  })
+
+  it('re-places from the original rect, so repeated zoom steps do not drift', () => {
+    // The stale layer is re-placed on every step while it is held, so the
+    // ratio is always measured against the scale it was RASTERISED at, never
+    // against wherever it currently sits. Applying 1.25 five times to the
+    // previous result instead would compound.
+    const tile = { col: 0, row: 0, left: 0, top: 0, width: 1024, height: 1024 }
+    const direct = scaleTileRect(tile, 1.25 ** 5)
+    let compounded = { ...tile }
+    for (let i = 0; i < 5; i++) {
+      const step = scaleTileRect(compounded as typeof tile, 1.25)
+      compounded = { ...compounded, ...step }
+    }
+    assert.ok(
+      Math.abs(direct.width - compounded.width) < 1e-9,
+      'compounding and direct application must agree for this to be safe either way'
+    )
   })
 
   it('keys tiles by zoom, so a stale zoom cannot be reused', () => {

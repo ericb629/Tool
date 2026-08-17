@@ -583,6 +583,13 @@ body,
   pointer-events: none;
 }
 
+/* `--stale` holds the previous zoom's tiles, stretched by the ratio between the
+   two scales while the new ones rasterise. It needs no rules of its own: it is
+   the same layer, placed BEFORE the live one in the DOM, and these are
+   positioned siblings with no z-index, so paint order is DOM order and an
+   incoming tile always wins wherever it lands. Deliberately no z-index anywhere
+   in this stack - adding it to the tile layers would lift them over the
+   markup overlay, which has none. See pdf/tiles.ts for why the layer exists. */
 .pdf-page__tile {
   position: absolute;
   display: block;

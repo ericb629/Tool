@@ -7,6 +7,7 @@ import { PREVIEW_DEADLINE_MS, canAcceptPointerInput, shouldRenderPreview } from 
 import {
   TILE_BUFFER_PX,
   expandRegion,
+  scaleTileRect,
   tileKey,
   tileSetBounds,
   tilesCovering,
@@ -173,6 +174,8 @@ export default function PdfPageCanvas({
 }: PdfPageCanvasProps) {
   const previewCanvasRef = useRef<HTMLCanvasElement>(null)
   const tileLayerRef = useRef<HTMLDivElement>(null)
+  /** Holds the previous zoom's tiles while the current zoom rasterises. */
+  const staleLayerRef = useRef<HTMLDivElement>(null)
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null)
 
   // Held in a ref so an unstable callback from the parent cannot re-run the
@@ -441,10 +444,48 @@ export default function PdfPageCanvas({
   // boundary would otherwise reconcile the whole page subtree, and tiles must
   // be attached only once they hold a finished bitmap.
   const liveTiles = useRef(new Map<string, HTMLCanvasElement>())
+  /**
+   * The previous zoom's tiles, kept on screen underneath while the current
+   * zoom rasterises, and re-placed by the ratio between the two scales.
+   *
+   * WHY THIS EXISTS. `tileKey` bakes in the scale, so a zoom step invalidates
+   * every tile at once, and the discard loop below used to remove them all
+   * immediately. That left the preview as the only thing on screen - and the
+   * preview is 250k pixels stretched over the whole page box, a 2.6x upscale at
+   * fit width and far worse zoomed in. Sharp, then very blurry, then sharp
+   * again, once per step: what a rapid zoom felt like was flashing.
+   *
+   * A previous attempt at a two-generation scheme did nothing at all, because
+   * its state lived in per-component refs while pages were REMOUNTING on every
+   * zoom step, so React destroyed it before it could render. That lifecycle bug
+   * was the stale-scroll-offset one, fixed in 9e18835 - five zoom clicks now
+   * produce zero page mounts. This state therefore survives a zoom, which is
+   * the precondition the earlier attempt silently lacked. If pages ever start
+   * remounting on zoom again, this stops working and goes quiet about it.
+   */
+  const staleTiles = useRef(new Map<string, { canvas: HTMLCanvasElement; tile: Tile }>())
+  /**
+   * Geometry of each live tile, kept because a tile that becomes stale has to
+   * be re-placed from its ORIGINAL page-local rect. Reading it back off the DOM
+   * would compound rounding across a run of zoom steps.
+   */
+  const renderedTiles = useRef(new Map<string, Tile>())
+  /** The scale `liveTiles` was rasterised at, so a zoom step is detectable. */
+  const liveScale = useRef(scale)
+  /** The scale `staleTiles` was rasterised at, for the re-placement ratio. */
+  const staleScale = useRef(scale)
 
-  useEffect(() => {
+  // A LAYOUT effect, unlike every other render effect here, and for the same
+  // reason the preview is sized in one: the page box has already been resized
+  // by the time this runs, so re-placing the stale generation in a passive
+  // effect would leave it at the previous zoom's geometry for one frame on
+  // every step. The prologue below is a handful of style writes over at most a
+  // few tiles; the actual rasterisation is still async and still off the
+  // critical path.
+  useLayoutEffect(() => {
     const layer = tileLayerRef.current
-    if (!page || !viewport || !layer) return
+    const staleLayer = staleLayerRef.current
+    if (!page || !viewport || !layer || !staleLayer) return
 
     const dpr = window.devicePixelRatio || 1
     const wanted = new Map(tilesRef.current.map((t) => [tileKey(t, scale, rotation, dpr), t]))
@@ -453,8 +494,66 @@ export default function PdfPageCanvas({
     perfCount('tiles:effect passes') // PERF
     if (perfOn()) perfRecord('tiles:wanted', wanted.size, { page: pageNumber, detail: `scale ${scale.toFixed(3)}` }) // PERF
 
-    // Discard anything outside the buffer, and everything from a previous
-    // zoom (scale is part of the key). This is what bounds memory on a pan.
+    const dropStale = (): void => {
+      for (const { canvas } of staleTiles.current.values()) {
+        canvas.remove()
+        canvas.width = 0
+        canvas.height = 0
+      }
+      staleTiles.current.clear()
+    }
+
+    const zoomed = scale !== liveScale.current
+    if (zoomed) {
+      // Only ever ONE stale generation, so this cannot grow with the number of
+      // zoom steps.
+      //
+      // Promote the outgoing generation ONLY IF IT HAS ANYTHING IN IT. On a
+      // fast zoom the previous step's tiles may not have landed yet, and
+      // promoting an empty generation would throw away the last sharp thing on
+      // screen and put the blurry preview back - exactly the case this is here
+      // to fix. Keeping the older stale layer instead means a rapid run of
+      // steps stretches one good bitmap progressively, rather than flashing.
+      if (liveTiles.current.size > 0) {
+        dropStale()
+        for (const [key, canvas] of liveTiles.current) {
+          const tile = renderedTiles.current.get(key)
+          if (!tile) {
+            canvas.remove()
+            canvas.width = 0
+            canvas.height = 0
+            continue
+          }
+          staleLayer.appendChild(canvas)
+          staleTiles.current.set(key, { canvas, tile })
+        }
+        staleScale.current = liveScale.current
+        perfCount('tiles:generations promoted') // PERF
+      } else {
+        perfCount('tiles:stale generation held') // PERF
+      }
+      liveTiles.current.clear()
+      renderedTiles.current.clear()
+      liveScale.current = scale
+    }
+
+    // Re-place the stale generation for the scale now on screen. The bitmaps
+    // are not re-rendered; the browser stretches them for the few frames the
+    // new generation is in flight.
+    if (staleTiles.current.size > 0) {
+      const ratio = scale / staleScale.current
+      for (const { canvas, tile } of staleTiles.current.values()) {
+        const rect = scaleTileRect(tile, ratio)
+        canvas.style.left = `${rect.left}px`
+        canvas.style.top = `${rect.top}px`
+        canvas.style.width = `${rect.width}px`
+        canvas.style.height = `${rect.height}px`
+      }
+    }
+
+    // Discard anything outside the buffer. This is what bounds memory on a pan.
+    // Tiles from a previous zoom are no longer swept up here - they were moved
+    // to the stale layer above and are removed once the new set has landed.
     for (const [key, canvas] of liveTiles.current) {
       if (wanted.has(key)) continue
       perfCount('tiles:discarded') // PERF
@@ -464,6 +563,7 @@ export default function PdfPageCanvas({
       canvas.width = 0
       canvas.height = 0
       liveTiles.current.delete(key)
+      renderedTiles.current.delete(key)
     }
 
     let cancelled = false
@@ -545,6 +645,7 @@ export default function PdfPageCanvas({
 
         layer.appendChild(canvas)
         liveTiles.current.set(key, canvas)
+        renderedTiles.current.set(key, tile)
         // Opens the preview gate: the sharp layer is on screen for this page, so
         // its preview can render now without competing for animation frames.
         if (!cancelled) {
@@ -562,7 +663,13 @@ export default function PdfPageCanvas({
       // 2-6 tiles, so this is the other end of the window in which the page the
       // user navigated to is still rendering. Pairing the two says whether the
       // neighbour's parse lands inside it.
-      if (!cancelled && perfOn()) { // PERF
+      if (cancelled) return
+      // The new generation covers the view, so the stretched one underneath has
+      // nothing left to cover. Dropping it here rather than on the first tile is
+      // deliberate: the first tile covers only its own corner, and removing the
+      // stale layer then would put the blurred preview back for the rest.
+      dropStale()
+      if (perfOn()) { // PERF
         perfRecord('tiles:set complete', performance.now() - tileSetAt, {
           page: pageNumber,
           detail: `${wanted.size} tiles`
@@ -579,9 +686,12 @@ export default function PdfPageCanvas({
   }, [page, viewport, tileSignature, scale, rotation])
 
   // Drop every tile on unmount - the page leaving the virtualized range is
-  // what has to release this memory.
+  // what has to release this memory. Both generations, or the stale one would
+  // outlive the page that owns it.
   useEffect(() => {
     const tileMap = liveTiles.current
+    const staleMap = staleTiles.current
+    const geometry = renderedTiles.current
     return () => {
       for (const canvas of tileMap.values()) {
         canvas.remove()
@@ -589,6 +699,13 @@ export default function PdfPageCanvas({
         canvas.height = 0
       }
       tileMap.clear()
+      for (const { canvas } of staleMap.values()) {
+        canvas.remove()
+        canvas.width = 0
+        canvas.height = 0
+      }
+      staleMap.clear()
+      geometry.clear()
     }
   }, [])
 
@@ -661,6 +778,9 @@ export default function PdfPageCanvas({
         </div>
       ) : null}
       <canvas ref={previewCanvasRef} className="pdf-page__canvas pdf-page__canvas--preview" />
+      {/* Before the live layer, so the outgoing generation always paints
+          UNDER the incoming one regardless of the order tiles land in. */}
+      <div ref={staleLayerRef} className="pdf-page__tiles pdf-page__tiles--stale" />
       <div ref={tileLayerRef} className="pdf-page__tiles" />
       <canvas
         ref={overlayCanvasRef}

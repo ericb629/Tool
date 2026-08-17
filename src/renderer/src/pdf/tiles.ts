@@ -130,3 +130,32 @@ export function tileSetBounds(tiles: Tile[]): PageRegion | undefined {
 export function tileKey(tile: Tile, scale: number, rotation: number, dpr: number): string {
   return `${scale.toFixed(6)}|${rotation}|${dpr}|${tile.col}|${tile.row}`
 }
+
+/**
+ * Where a tile rendered at one scale belongs on screen at another.
+ *
+ * A tile's geometry is page-local CSS pixels at the scale it was rasterised,
+ * and the page box is itself proportional to scale, so re-placing an old tile
+ * under a new scale is a single ratio applied to all four numbers. The bitmap
+ * is not re-rendered - the browser stretches it - which is why this is only
+ * ever used for the OUTGOING generation while the new one rasterises.
+ *
+ * This is the one case the "never CSS-scale a canvas to fake a zoom" rule
+ * explicitly allows: the old bitmap stretched for the few frames a re-render is
+ * in flight. It is bounded by being replaced the moment real tiles land, and it
+ * is strictly better than the alternative - before this, a scale change
+ * discarded every tile at once and left the 250k-pixel preview stretched over
+ * the whole page, which at fit width is a 2.6x upscale and much worse zoomed
+ * in. That read as the page flashing between sharp and blurred on every step.
+ *
+ * Measurement is unaffected: hit-testing and geometry go through the page
+ * viewport, never through a tile.
+ */
+export function scaleTileRect(tile: Tile, ratio: number): PageRegion {
+  return {
+    left: tile.left * ratio,
+    top: tile.top * ratio,
+    width: tile.width * ratio,
+    height: tile.height * ratio
+  }
+}
