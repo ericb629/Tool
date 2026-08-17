@@ -48,12 +48,31 @@ export interface PageOverlayContext {
 /**
  * Full-page fallback bitmap budget, in device pixels.
  *
- * Deliberately small. This layer exists only so the page is never blank -
- * while tiles rasterise, and for the frames after a zoom before the new tiles
- * land. It is stretched to whatever the page box currently is, so it is
- * rendered ONCE per page and never re-rendered on zoom.
+ * This layer exists only so the page is never blank - while tiles rasterise,
+ * and for the frames after a zoom before the new tiles land. It is stretched
+ * to whatever the page box currently is, so it is rendered ONCE per page and
+ * never re-rendered on zoom.
+ *
+ * WHY IT IS THIS SMALL
+ *
+ * Measured, five zoom-in clicks on the Kincora set: 34 page mounts produced 16
+ * previews costing 7569ms total, 399.6ms median - the single largest line item,
+ * larger than tile rasterisation (4773ms) and 16x larger than all PDF parsing
+ * (460ms). A preview is a full-page raster, so it pays the whole operator list
+ * plus fill for the entire sheet, and it is thrown away on unmount because the
+ * bitmap lives on a canvas inside the component.
+ *
+ * At the previous 2_000_000 a 36x24 sheet (2592x1728pt, 4.48Mpx unscaled)
+ * rendered at scale 0.668 -> 1731x1154. At 250_000 it renders at 0.236 ->
+ * 612x408, which is ~8x less fill.
+ *
+ * The trade is deliberate and bounded: this bitmap is ALREADY stretched and
+ * soft by design, and it is always covered by sharp tiles once they land. It
+ * is a "never show white" placeholder, not something measurements are taken
+ * against - that is what the tile layer is for. Making it softer stays inside
+ * its stated purpose; making it bigger would not.
  */
-const PREVIEW_MAX_PIXELS = 2_000_000
+const PREVIEW_MAX_PIXELS = 250_000
 
 interface PdfPageCanvasProps {
   doc: PDFDocumentProxy
