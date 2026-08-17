@@ -104,7 +104,52 @@ Corollary that wasted real time once: **a hidden or unfocused window throttles
 rAF to nothing**, so any measurement taken against a window that is not on
 screen is invalid, not merely noisy. It looks exactly like rendering hanging.
 
-### 2. Range prefetch — LATENCY, and the addressable one
+### 2a. Whole-file residency — MEASURED AND REJECTED
+
+Prompted by Bluebeam loading any page of this set in under a second, cold. The
+hypothesis was that a local file on an SSD should be read or indexed in full on
+open, making `disableAutoFetch: true` the wrong model. Measured:
+
+  whole 523MB file off this SSD    246ms first, 188ms repeat (2.1-2.8 GB/s)
+  page 138 parse, demand-fetched   2615ms
+  page 138 parse, all bytes resident 2353ms
+  memory, getDocument({data})      rss 1020 -> 2097MB (pdf.js keeps its own copy)
+
+**Residency buys ~10% for ~523MB per open document.** The bytes were never the
+bottleneck - disk is two orders of magnitude cheaper than the parse. Do not
+reach for `disableAutoFetch: false`.
+
+What IS real is that the app's I/O is IPC-bound rather than disk-bound: 196
+requests measured at **3463ms in the app** against **936ms of actual read()**
+in-process. That gap is ~200 round trips through preload and structured clone,
+which is what item 2 below should attack - fewer and larger requests, or serving
+ranges from a buffer held in MAIN (523MB there, not in every renderer tab).
+
+### 2b. Parse cost is per-PAGE, not per-document
+
+The single most useful number found so far, because it reframes what "slow"
+means. Measured operator-list construction:
+
+  page    ops        parse    kind
+    60     47478      141ms   vector
+    23     52349      290ms   vector
+     1     46919      370ms   vector
+     4       477      960ms   one JBIG2 scan
+   138     12302     2429ms   photo collage
+    10   1489578     3071ms   huge vector
+   137     12318     5265ms   photo collage
+
+A normal plan sheet parses in 141-370ms. The pathological pages are image-heavy,
+and their cost is DECODE, not operator count - page 137 has 12k operators and
+takes 5.3s while page 10 has 1.49M operators and takes 3.1s. Never reason about
+page cost from operator count.
+
+Bluebeam is native C++, so its JBIG2/JPEG2000 decode is likely far faster than
+pdf.js's wasm path regardless of scheduling. Sub-second on page 137 may be partly
+decoder speed that scheduling cannot close - worth establishing before treating
+1s as the target for every page rather than for normal sheets.
+
+### 2c. Range prefetch — LATENCY, and the addressable one
 This is the part of "floor-bound" that *is* fixable, and it should not be
 confused with the item above.
 
