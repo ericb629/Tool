@@ -17,7 +17,8 @@ const base: PreviewGateState = {
   wantsTiles: true,
   hasTile: false,
   tilesFailed: false,
-  deadlineReached: false
+  deadlineReached: false,
+  heldForForeground: false
 }
 
 describe('preview gate', () => {
@@ -48,21 +49,41 @@ describe('preview gate', () => {
     assert.equal(shouldRenderPreview({ ...base, deadlineReached: true }), true)
   })
 
+  it('holds an overscan page while the foreground is still rendering', () => {
+    // The parse an overscan page triggers is the whole cost being deferred:
+    // jumping to page 138 parsed 137 (5265ms) and 138 (2429ms) in one
+    // single-threaded worker, and only 138 was on screen.
+    assert.equal(shouldRenderPreview({ ...base, wantsTiles: false, heldForForeground: true }), false)
+    assert.equal(shouldRenderPreview({ ...base, wantsTiles: false, heldForForeground: false }), true)
+  })
+
+  it('lets the escape hatches override the foreground hold', () => {
+    // Otherwise the hold becomes a third way to wait forever.
+    assert.equal(shouldRenderPreview({ ...base, heldForForeground: true, deadlineReached: true }), true)
+    assert.equal(shouldRenderPreview({ ...base, heldForForeground: true, tilesFailed: true }), true)
+  })
+
   it('has no state in which a page waits forever', () => {
-    // Exhaustive over the four booleans: whenever the page is not simply
-    // waiting for a tile that may still arrive, the preview must render.
-    for (const wantsTiles of [true, false]) {
-      for (const hasTile of [true, false]) {
-        for (const tilesFailed of [true, false]) {
-          for (const deadlineReached of [true, false]) {
-            const state = { wantsTiles, hasTile, tilesFailed, deadlineReached }
-            const blocked = !shouldRenderPreview(state)
-            if (!blocked) continue
-            assert.deepEqual(
-              state,
-              { wantsTiles: true, hasTile: false, tilesFailed: false, deadlineReached: false },
-              `blocked in a state that has no exit: ${JSON.stringify(state)}`
-            )
+    // Exhaustive over all five booleans: a blocked state must always be one
+    // that something can still resolve - a tile that may arrive, or a
+    // foreground render that will finish - never a dead end.
+    const bools = [true, false]
+    for (const wantsTiles of bools) {
+      for (const hasTile of bools) {
+        for (const tilesFailed of bools) {
+          for (const deadlineReached of bools) {
+            for (const heldForForeground of bools) {
+              const state = { wantsTiles, hasTile, tilesFailed, deadlineReached, heldForForeground }
+              if (shouldRenderPreview(state)) continue
+              // Blocked. The deadline must still be able to release it.
+              assert.equal(
+                shouldRenderPreview({ ...state, deadlineReached: true }),
+                true,
+                `no deadline exit from ${JSON.stringify(state)}`
+              )
+              assert.equal(deadlineReached, false, `blocked despite the deadline: ${JSON.stringify(state)}`)
+              assert.equal(tilesFailed, false, `blocked despite tile failure: ${JSON.stringify(state)}`)
+            }
           }
         }
       }

@@ -56,6 +56,17 @@
 export const PREVIEW_DEADLINE_MS = 12_000
 
 export interface PreviewGateState {
+  /**
+   * The viewer is still rendering a page the user is actually looking at, and
+   * this page is not one of them.
+   *
+   * An overscan page has no visible region, so it rasterises no tiles and its
+   * preview would otherwise start IMMEDIATELY - building the whole operator
+   * list while the destination page is still being parsed and rendered, in a
+   * single-threaded worker. Measured: a jump to page 138 parses page 137
+   * (5265ms) and page 138 (2429ms), and only the second is on screen.
+   */
+  heldForForeground: boolean
   /** This page has a visible region, so it is going to rasterise tiles. */
   wantsTiles: boolean
   /** At least one tile has been painted for this page. */
@@ -76,8 +87,13 @@ export function shouldRenderPreview({
   wantsTiles,
   hasTile,
   tilesFailed,
-  deadlineReached
+  deadlineReached,
+  heldForForeground
 }: PreviewGateState): boolean {
+  // The two escape hatches win over everything, including the foreground hold.
+  // Whatever else is true, a page must not be able to wait forever.
+  if (deadlineReached || tilesFailed) return true
+  if (heldForForeground) return false
   if (!wantsTiles) return true
-  return hasTile || tilesFailed || deadlineReached
+  return hasTile
 }

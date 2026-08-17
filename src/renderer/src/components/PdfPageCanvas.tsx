@@ -112,6 +112,15 @@ interface PdfPageCanvasProps {
    * content should change.
    */
   overlayRevision?: string | number
+  /**
+   * Hold this page's preview because the viewer is still rendering a page the
+   * user is actually looking at. Only meaningful for overscan pages, which have
+   * no visible region and would otherwise start building their operator list
+   * immediately. See pdf/previewGate.
+   */
+  holdPreview?: boolean
+  /** Reports the first painted tile, so the viewer knows the foreground landed. */
+  onFirstTile?: (pageNumber: number) => void
 }
 
 /**
@@ -150,7 +159,9 @@ export default function PdfPageCanvas({
   renderOverlay,
   onPointerDown,
   onViewportReady,
-  overlayRevision = 0
+  overlayRevision = 0,
+  holdPreview = false,
+  onFirstTile
 }: PdfPageCanvasProps) {
   const previewCanvasRef = useRef<HTMLCanvasElement>(null)
   const tileLayerRef = useRef<HTMLDivElement>(null)
@@ -291,10 +302,14 @@ export default function PdfPageCanvas({
   // whose tile never lands stays blank forever - see pdf/previewGate for the
   // three ways that happens.
   useEffect(() => {
-    if (!page || !wantsTiles || hasTile || tilesFailed || previewDeadlineReached) return
+    if (!page || tilesFailed || previewDeadlineReached) return
+    // Runs while waiting for a first tile OR while held for the foreground:
+    // both are waits, and both need the same backstop.
+    if (!wantsTiles && !holdPreview) return
+    if (wantsTiles && hasTile && !holdPreview) return
     const timer = window.setTimeout(() => setPreviewDeadlineReached(true), PREVIEW_DEADLINE_MS)
     return () => window.clearTimeout(timer)
-  }, [page, wantsTiles, hasTile, tilesFailed, previewDeadlineReached])
+  }, [page, wantsTiles, hasTile, tilesFailed, previewDeadlineReached, holdPreview])
 
   const previewPainted = useRef(false)
   useEffect(() => {
@@ -305,7 +320,16 @@ export default function PdfPageCanvas({
     if (!page) return
     if (previewPainted.current) return
     // Waiting on the sharp layer. When the first tile lands this effect re-runs.
-    if (!shouldRenderPreview({ wantsTiles, hasTile, tilesFailed, deadlineReached: previewDeadlineReached })) return
+    if (
+      !shouldRenderPreview({
+        wantsTiles,
+        hasTile,
+        tilesFailed,
+        deadlineReached: previewDeadlineReached,
+        heldForForeground: holdPreview
+      })
+    )
+      return
     let cancelled = false
     let task: RenderTask | undefined
 
@@ -371,7 +395,7 @@ export default function PdfPageCanvas({
     }
     // hasTile/wantsTiles are the gate. Booleans, not the `visible` object, so a
     // pan that only changes the visible RECTANGLE does not re-run this.
-  }, [page, rotation, wantsTiles, hasTile, tilesFailed, previewDeadlineReached])
+  }, [page, rotation, wantsTiles, hasTile, tilesFailed, previewDeadlineReached, holdPreview])
 
   // The preview is stretched to whatever the page box currently is, so a zoom
   // never leaves it at the wrong size while tiles are still rendering.
@@ -492,7 +516,10 @@ export default function PdfPageCanvas({
         liveTiles.current.set(key, canvas)
         // Opens the preview gate: the sharp layer is on screen for this page, so
         // its preview can render now without competing for animation frames.
-        if (!cancelled) setHasTile(true)
+        if (!cancelled) {
+          setHasTile(true)
+          onFirstTile?.(pageNumber)
+        }
         auditDecode(page)
         perfPresent(blitAt, pageNumber) // PERF
         // PERF: sampled right after a tile is attached - the moment the live

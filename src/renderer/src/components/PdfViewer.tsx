@@ -622,6 +622,31 @@ export default function PdfViewer({
     onMarqueeComplete?.(selections, g.additive)
   }
 
+  /**
+   * Pages that have painted a tile since the last navigation.
+   *
+   * Overscan pages rasterise nothing, so their preview would start immediately
+   * and build a full operator list while the destination page is still being
+   * parsed - in a single-threaded worker. Measured: a jump to page 138 parsed
+   * page 137 (5265ms) as well as page 138 (2429ms), and only 138 was on screen.
+   * So overscan previews wait until something the user is looking at has landed.
+   */
+  const [paintedPages, setPaintedPages] = useState<ReadonlySet<number>>(new Set())
+  const handleFirstTile = useCallback((pageNumber: number) => {
+    setPaintedPages((prev) => (prev.has(pageNumber) ? prev : new Set(prev).add(pageNumber)))
+  }, [])
+
+  // A visible page is one with an on-screen region; those are the foreground.
+  const foregroundReady = useMemo(() => {
+    let anyVisible = false
+    for (const pageNumber of visibleRegions.keys()) {
+      anyVisible = true
+      if (paintedPages.has(pageNumber)) return true
+    }
+    // Nothing visible yet means nothing to wait for.
+    return !anyVisible
+  }, [visibleRegions, paintedPages])
+
   const registerPage = useCallback((pageNumber: number, context: PageOverlayContext | undefined) => {
     if (context) pageContexts.current.set(pageNumber, context)
     else pageContexts.current.delete(pageNumber)
@@ -730,6 +755,8 @@ export default function PdfViewer({
                     onPointerDown={onPagePointerDown}
                     onViewportReady={registerPage}
                     overlayRevision={overlayRevision}
+                    holdPreview={!foregroundReady && !visibleRegions.has(pageNumber)}
+                    onFirstTile={handleFirstTile}
                   />
                 </div>
               )
