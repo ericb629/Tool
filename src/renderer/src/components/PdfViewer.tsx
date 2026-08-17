@@ -16,7 +16,7 @@ import {
   type ZoomAnchor
 } from '../pdf/zoomAnchor'
 import { behaviorForButton, type InteractionConfig } from '../tools/interaction'
-import { perfCount, perfRecord } from '../pdf/perf' // PERF
+import { perfCount, perfNow, perfOn, perfRecord } from '../pdf/perf' // PERF
 
 export type { InteractionConfig }
 import PdfPageCanvas, { type PageOverlayContext } from './PdfPageCanvas'
@@ -132,13 +132,17 @@ export default function PdfViewer({
         setErrorMessage(message)
       })
       // `pdfBug` turns on pdf.js's own StatTimer, which is what splits worker
-      // parse ("Page Request") from canvas raster ("Rendering"). Existing
-      // option in the installed build, not a new dependency. See pdf/perf.ts.
+      // parse ("Page Request") from canvas raster ("Rendering").
+      //
+      // GATED, not unconditional: StatTimer runs inside the render loop, and
+      // there is no reason for a shipped build to pay for it. Read once here, at
+      // open, so __PDF_PERF__ has to be set BEFORE the document opens for
+      // bucket (b) to appear in the report. See pdf/perf.ts.
       task = pdfjsLib.getDocument({
         range: transport,
         disableAutoFetch: true,
         disableStream: true,
-        pdfBug: true // PERF
+        pdfBug: perfOn() // PERF
       })
 
       try {
@@ -225,12 +229,14 @@ export default function PdfViewer({
       // stays pure. It has exactly one production caller, so this is the same
       // number. StrictMode double-invokes useMemo factories, so with it on this
       // runs 2x per render pass and there are 2 render passes per wheel tick.
-      const at = performance.now() // PERF
+      const at = perfNow() // PERF
       const result = computePageLayout(basePageSizes, scale, containerSize.width, PAGE_GAP)
-      perfCount('layout:computePageLayout') // PERF
-      perfRecord('layout:computePageLayout', performance.now() - at, {
-        detail: `${basePageSizes.length} pages`
-      }) // PERF
+      if (perfOn()) { // PERF
+        perfCount('layout:computePageLayout')
+        perfRecord('layout:computePageLayout', performance.now() - at, {
+          detail: `${basePageSizes.length} pages`
+        })
+      }
       return result
     },
     [basePageSizes, scale, containerSize.width]
@@ -328,7 +334,9 @@ export default function PdfViewer({
    * larger than the viewport, and without this it would rasterise in full.
    */
   const visibleRegions = useMemo(() => {
-    const regionsAt = performance.now() // PERF
+    // Hot: this memo recomputes on every scroll and pan frame, so the start
+    // stamp must not be an unconditional performance.now().
+    const regionsAt = perfNow() // PERF
     perfCount('layout:visibleRegions') // PERF
     const regions = new Map<number, PageRegion>()
     if (containerSize.width === 0 || containerSize.height === 0) return regions
@@ -349,7 +357,7 @@ export default function PdfViewer({
         height: overlap.height
       })
     })
-    perfRecord('layout:visibleRegions', performance.now() - regionsAt) // PERF
+    if (perfOn()) perfRecord('layout:visibleRegions', performance.now() - regionsAt) // PERF
     return regions
   }, [layout, scrollLeft, scrollTop, containerSize])
 
@@ -386,10 +394,12 @@ export default function PdfViewer({
     let lastWheelAt = 0 // PERF
     const onWheel = (event: WheelEvent): void => {
       if (!event.ctrlKey) return // plain wheel keeps the container's native scroll
-      const now = performance.now() // PERF
-      if (now - lastWheelAt > 200) perfCount('zoom:wheel gestures') // PERF
-      lastWheelAt = now // PERF
-      perfCount('zoom:wheel events') // PERF
+      if (perfOn()) { // PERF
+        const now = performance.now()
+        if (now - lastWheelAt > 200) perfCount('zoom:wheel gestures')
+        lastWheelAt = now
+        perfCount('zoom:wheel events')
+      }
       event.preventDefault()
       const factor = Math.exp(-event.deltaY / 400)
       applyZoom(scaleRef.current * factor, event.clientX, event.clientY)

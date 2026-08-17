@@ -15,6 +15,8 @@ import {
 import {
   perfCanvasSample,
   perfCount,
+  perfNow,
+  perfOn,
   perfOffscreenClose,
   perfOffscreenOpen,
   perfOpListLength,
@@ -169,11 +171,11 @@ export default function PdfPageCanvas({
     // is the whole point: doc.getPage() below returns the same proxy from
     // pdf.js's own cache, operator list and all.
     releasePage(doc, pageNumber)
-    const getPageAt = performance.now() // PERF
+    const getPageAt = perfNow() // PERF
     void doc
       .getPage(pageNumber)
       .then((p) => {
-        perfRecord('page:getPage', performance.now() - getPageAt, { page: pageNumber }) // PERF
+        if (perfOn()) perfRecord('page:getPage', performance.now() - getPageAt, { page: pageNumber }) // PERF
         loaded = p
         if (!cancelled) setPage(p)
       })
@@ -282,10 +284,10 @@ export default function PdfPageCanvas({
         perfOffscreenOpen() // PERF
         offscreenOpen = true // PERF
         const statsFrom = perfStatsMark(page) // PERF
-        const rasterAt = performance.now() // PERF
+        const rasterAt = perfNow() // PERF
         task = page.render({ canvas: offscreen, viewport: previewViewport })
         await task.promise
-        perfRecord('raster:preview', performance.now() - rasterAt, { page: pageNumber, detail: `${w}x${h}` }) // PERF
+        if (perfOn()) perfRecord('raster:preview', performance.now() - rasterAt, { page: pageNumber, detail: `${w}x${h}` }) // PERF
         perfStatsDrain(page, pageNumber, statsFrom) // PERF
         perfOpListLength(page, pageNumber) // PERF
         if (cancelled) {
@@ -300,10 +302,10 @@ export default function PdfPageCanvas({
           offscreenOpen = false // PERF
           return
         }
-        const blitAt = performance.now() // PERF
+        const blitAt = perfNow() // PERF
         canvas.width = w
         canvas.height = h
-        perfSync('blit:preview', { page: pageNumber }, () => canvas.getContext('2d')?.drawImage(offscreen, 0, 0)) // PERF
+        perfSync('blit:preview', pageNumber, () => canvas.getContext('2d')?.drawImage(offscreen, 0, 0)) // PERF
         perfPresent(blitAt, pageNumber) // PERF
         offscreen.width = 0
         offscreen.height = 0
@@ -354,7 +356,7 @@ export default function PdfPageCanvas({
 
     perfRegisterPage(pageNumber, page, viewport) // PERF
     perfCount('tiles:effect passes') // PERF
-    perfRecord('tiles:wanted', wanted.size, { page: pageNumber, detail: `scale ${scale.toFixed(3)}` }) // PERF
+    if (perfOn()) perfRecord('tiles:wanted', wanted.size, { page: pageNumber, detail: `scale ${scale.toFixed(3)}` }) // PERF
 
     // Discard anything outside the buffer, and everything from a previous
     // zoom (scale is part of the key). This is what bounds memory on a pan.
@@ -386,7 +388,7 @@ export default function PdfPageCanvas({
         perfOffscreenOpen() // PERF
 
         const statsFrom = perfStatsMark(page) // PERF
-        const rasterAt = performance.now() // PERF
+        const rasterAt = perfNow() // PERF
         try {
           // The page is rendered through its FULL viewport; the transform
           // shifts this tile's region into the tile canvas and scales to
@@ -400,10 +402,12 @@ export default function PdfPageCanvas({
           // PERF: tile pixel area is recorded alongside the time, so the
           // report shows whether cost tracks area (fill-bound) or is flat
           // regardless of area (operator-list-dispatch-bound).
-          perfRecord('raster:tile', performance.now() - rasterAt, {
-            page: pageNumber,
-            detail: `${deviceWidth}x${deviceHeight}`
-          }) // PERF
+          if (perfOn()) { // PERF
+            perfRecord('raster:tile', performance.now() - rasterAt, {
+              page: pageNumber,
+              detail: `${deviceWidth}x${deviceHeight}`
+            })
+          }
           perfStatsDrain(page, pageNumber, statsFrom) // PERF
           perfOpListLength(page, pageNumber) // PERF
           perfCount('raster:tiles completed') // PERF
@@ -415,7 +419,7 @@ export default function PdfPageCanvas({
             // PERF: a high cancelled:completed ratio during a zoom gesture is
             // the direct evidence for the no-coalescing hypothesis.
             perfCount('raster:tiles cancelled') // PERF
-            perfRecord('raster:tile wasted', performance.now() - rasterAt, { page: pageNumber }) // PERF
+            if (perfOn()) perfRecord('raster:tile wasted', performance.now() - rasterAt, { page: pageNumber }) // PERF
             return
           }
           setRenderError(err instanceof Error ? err.message : String(err))
@@ -428,7 +432,7 @@ export default function PdfPageCanvas({
           return
         }
 
-        const blitAt = performance.now() // PERF
+        const blitAt = perfNow() // PERF
         const canvas = document.createElement('canvas')
         canvas.className = 'pdf-page__tile'
         canvas.width = deviceWidth
@@ -437,7 +441,7 @@ export default function PdfPageCanvas({
         canvas.style.top = `${tile.top}px`
         canvas.style.width = `${tile.width}px`
         canvas.style.height = `${tile.height}px`
-        perfSync('blit:tile', { page: pageNumber }, () => canvas.getContext('2d')?.drawImage(offscreen, 0, 0)) // PERF
+        perfSync('blit:tile', pageNumber, () => canvas.getContext('2d')?.drawImage(offscreen, 0, 0)) // PERF
         offscreen.width = 0
         offscreen.height = 0
         perfOffscreenClose() // PERF
@@ -500,7 +504,7 @@ export default function PdfPageCanvas({
     overlay.style.width = `${overlayRegion.width}px`
     overlay.style.height = `${overlayRegion.height}px`
 
-    const overlayAt = performance.now() // PERF
+    const overlayAt = perfNow() // PERF
     ctx.save()
     // Translate so callers keep drawing in FULL-PAGE CSS coordinates and never
     // have to know the overlay is a window onto the page.
@@ -513,7 +517,7 @@ export default function PdfPageCanvas({
       origin: { x: overlayRegion.left, y: overlayRegion.top }
     })
     ctx.restore()
-    perfRecord('overlay:redraw', performance.now() - overlayAt, { page: pageNumber }) // PERF
+    if (perfOn()) perfRecord('overlay:redraw', performance.now() - overlayAt, { page: pageNumber }) // PERF
   }, [viewport, overlayRegion, renderOverlay, pageNumber, overlayRevision])
 
   // Publish/withdraw this page's viewport for cross-page gestures.

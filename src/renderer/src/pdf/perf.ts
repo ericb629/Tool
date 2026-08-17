@@ -10,11 +10,19 @@
  *
  * Disabled unless `globalThis.__PDF_PERF__` is set, which it never is by
  * default - you turn it on from the devtools console. Every entry point below
- * early-returns when off, so the shipped cost is one boolean read per call.
+ * early-returns when off.
+ *
+ * BUCKET (b) NEEDS THE FLAG SET *BEFORE* THE DOCUMENT OPENS. Parse-vs-raster
+ * timing comes from pdf.js's own StatTimer, which is switched on by the
+ * `pdfBug` option passed to getDocument - read once, at open. That option is
+ * gated on this flag so StatTimer never runs inside the render loop in a
+ * shipped build, which means: set __PDF_PERF__ = true, THEN open the PDF. If
+ * the document is already open, close its tab and reopen it, or `pdfjs:*` rows
+ * will be missing from the report.
  *
  * Console API, all installed on `globalThis`:
  *
- *   __PDF_PERF__ = true          enable recording
+ *   __PDF_PERF__ = true          enable recording (before opening a document)
  *   __PDF_PERF_PHASE__('zoom')   label everything recorded from now on
  *   __PDF_PERF_DUMP__()          print the report (and return it as a string)
  *   __PDF_PERF_RESET__()         clear records and counters
@@ -66,6 +74,19 @@ export function perfOn(): boolean {
   return g.__PDF_PERF__ === true
 }
 
+/**
+ * A start stamp that costs nothing when recording is off.
+ *
+ * The guards live INSIDE the functions below, so a call site's ARGUMENTS are
+ * always evaluated - `performance.now()`, template strings and object literals
+ * all run even when disabled. That is fine once per document open and not fine
+ * on a path that runs per pan frame or per chunk, so hot sites use this and
+ * wrap their record call in `if (perfOn())`.
+ */
+export function perfNow(): number {
+  return perfOn() ? performance.now() : 0
+}
+
 export function perfRecord(kind: string, ms: number, extra?: Omit<Partial<PerfRecord>, 'kind' | 'ms'>): void {
   if (!perfOn()) return
   if (records.length >= RECORD_CAP) return
@@ -92,14 +113,19 @@ export async function perfTime<T>(
   }
 }
 
-/** Times a synchronous operation - used for the blit. */
-export function perfSync<T>(kind: string, extra: Omit<Partial<PerfRecord>, 'kind' | 'ms'>, run: () => T): T {
+/**
+ * Times a synchronous operation - used for the blit.
+ *
+ * Takes the page number rather than an options object so a disabled build does
+ * not allocate one per blit. The closure is inherent: it IS the work.
+ */
+export function perfSync<T>(kind: string, page: number, run: () => T): T {
   if (!perfOn()) return run()
   const start = performance.now()
   try {
     return run()
   } finally {
-    perfRecord(kind, performance.now() - start, extra)
+    perfRecord(kind, performance.now() - start, { page })
   }
 }
 
