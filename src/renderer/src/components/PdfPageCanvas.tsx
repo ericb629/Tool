@@ -7,10 +7,12 @@ import { PREVIEW_DEADLINE_MS, canAcceptPointerInput, shouldRenderPreview } from 
 import {
   TILE_BUFFER_PX,
   expandRegion,
+  fitsSingleCanvas,
   scaleTileRect,
   tileKey,
   tileSetBounds,
   tilesCovering,
+  wholePageTile,
   type PageRegion,
   type Tile
 } from '../pdf/tiles'
@@ -272,6 +274,16 @@ export default function PdfPageCanvas({
   // ---- which tiles the current view needs -----------------------------
   const tiles = useMemo(() => {
     if (!viewport || !visible) return []
+    // One canvas whenever the whole page fits in one, which covers fit width
+    // and a step or two beyond - the range the app is normally used at. Every
+    // tile replays the WHOLE operator list (pdf.js does no per-tile culling),
+    // so a grid there is N redundant redraws of the same content for no
+    // benefit: the page is only a few megapixels, and a single cell cannot be
+    // invalidated by panning. See fitsSingleCanvas in pdf/tiles.
+    const dpr = window.devicePixelRatio || 1
+    if (fitsSingleCanvas(viewport.width, viewport.height, dpr)) {
+      return [wholePageTile(viewport.width, viewport.height)]
+    }
     return tilesCovering(expandRegion(visible, TILE_BUFFER_PX), viewport.width, viewport.height)
   }, [viewport, visible])
 
@@ -570,9 +582,47 @@ export default function PdfPageCanvas({
     let task: RenderTask | undefined
     const tileSetAt = perfNow() // PERF
 
+    /**
+     * Attach finished tiles ALL AT ONCE, instead of one at a time as they land.
+     *
+     * Only when there is a stretched generation underneath to look at in the
+     * meantime - which means: during a zoom, never on arrival. Attaching
+     * progressively over a stretched layer is what produced small sharp patches
+     * sitting next to larger blurred ones, because a tile that has landed is at
+     * the new scale while its neighbours are still the old bitmap stretched up.
+     * The page went from uniformly soft to visibly quilted.
+     *
+     * On arrival there is nothing underneath, so progressive attachment is
+     * right there - something on screen beats everything at once.
+     */
+    const swapAtomically = staleTiles.current.size > 0
+    const pending: Array<{ key: string; canvas: HTMLCanvasElement; tile: Tile }> = []
+    const releasePending = (): void => {
+      for (const { canvas } of pending) {
+        canvas.width = 0
+        canvas.height = 0
+      }
+      pending.length = 0
+    }
+    const attachPending = (): void => {
+      for (const { key, canvas, tile } of pending) {
+        layer.appendChild(canvas)
+        liveTiles.current.set(key, canvas)
+        renderedTiles.current.set(key, tile)
+      }
+      if (pending.length > 0) {
+        setHasTile(true)
+        paintedChangeRef.current?.(pageNumber, true)
+      }
+      pending.length = 0
+    }
+
     void (async () => {
       for (const [key, tile] of wanted) {
-        if (cancelled) return
+        if (cancelled) {
+          releasePending()
+          return
+        }
         if (liveTiles.current.has(key)) continue
 
         const deviceWidth = Math.max(1, Math.round(tile.width * dpr))
@@ -616,8 +666,15 @@ export default function PdfPageCanvas({
             // the direct evidence for the no-coalescing hypothesis.
             perfCount('raster:tiles cancelled') // PERF
             if (perfOn()) perfRecord('raster:tile wasted', performance.now() - rasterAt, { page: pageNumber }) // PERF
+            // Superseded by a newer scale, so these are the wrong bitmaps now.
+            // Dropping them leaves liveTiles empty, which is exactly what makes
+            // the next pass HOLD the stale layer rather than promote nothing.
+            releasePending()
             return
           }
+          // Attach whatever did finish: a failed tile must not also cost the
+          // page the tiles that rendered before it.
+          attachPending()
           setTilesFailed(true)
           setRenderError(err instanceof Error ? err.message : String(err))
           return
@@ -626,6 +683,7 @@ export default function PdfPageCanvas({
           offscreen.width = 0
           offscreen.height = 0
           perfOffscreenClose() // PERF
+          releasePending()
           return
         }
 
@@ -643,14 +701,18 @@ export default function PdfPageCanvas({
         offscreen.height = 0
         perfOffscreenClose() // PERF
 
-        layer.appendChild(canvas)
-        liveTiles.current.set(key, canvas)
-        renderedTiles.current.set(key, tile)
-        // Opens the preview gate: the sharp layer is on screen for this page, so
-        // its preview can render now without competing for animation frames.
-        if (!cancelled) {
-          setHasTile(true)
-          paintedChangeRef.current?.(pageNumber, true)
+        if (swapAtomically) {
+          pending.push({ key, canvas, tile })
+        } else {
+          layer.appendChild(canvas)
+          liveTiles.current.set(key, canvas)
+          renderedTiles.current.set(key, tile)
+          // Opens the preview gate: the sharp layer is on screen for this page,
+          // so its preview can render now without competing for frames.
+          if (!cancelled) {
+            setHasTile(true)
+            paintedChangeRef.current?.(pageNumber, true)
+          }
         }
         auditDecode(page)
         perfPresent(blitAt, pageNumber) // PERF
@@ -663,11 +725,15 @@ export default function PdfPageCanvas({
       // 2-6 tiles, so this is the other end of the window in which the page the
       // user navigated to is still rendering. Pairing the two says whether the
       // neighbour's parse lands inside it.
-      if (cancelled) return
-      // The new generation covers the view, so the stretched one underneath has
-      // nothing left to cover. Dropping it here rather than on the first tile is
-      // deliberate: the first tile covers only its own corner, and removing the
-      // stale layer then would put the blurred preview back for the rest.
+      if (cancelled) {
+        releasePending()
+        return
+      }
+      // The whole set is ready. Attach it and drop the stretched generation in
+      // the same frame, so the page goes from uniformly soft to uniformly
+      // sharp with no intermediate quilt. Dropping stale on the FIRST tile
+      // instead would expose the blurred preview across everything else.
+      attachPending()
       dropStale()
       if (perfOn()) { // PERF
         perfRecord('tiles:set complete', performance.now() - tileSetAt, {

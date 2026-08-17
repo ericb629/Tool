@@ -72,6 +72,52 @@ export function intersectRegion(a: PageRegion, b: PageRegion): PageRegion | unde
 }
 
 /**
+ * Largest single full-page canvas this app will rasterise, in device pixels.
+ *
+ * Tiling exists for two reasons and BOTH are high-zoom reasons: staying clear
+ * of the 2^28 canvas paint cliff, and bounding memory when a page is far larger
+ * than the viewport. At fit width neither applies - the whole page is a few
+ * megapixels - and yet the page was still being cut into 2-6 canvases, each of
+ * which replays the ENTIRE operator list, because pdf.js does no per-tile
+ * culling. On a photo-collage sheet that is 2-6 full redraws of twelve aerials
+ * to fill one screen.
+ *
+ * That is why zooming got slower on complicated pages and barely changed on
+ * simple ones: the tax is per-tile-per-operator-type, so it scales with how
+ * expensive the page's content is.
+ *
+ * 32 Mpx is 12% of the measured cliff (251.9 Mpx paints, 286.7 fails), so this
+ * is a MEMORY bound, not a correctness one - 32 Mpx is 128 MB of backing store,
+ * and the stale generation can hold a second one during a zoom. For the real
+ * sheet geometry (2592x1728) a full-page canvas is 4.478M * scale^2 * dpr^2
+ * device pixels, so this covers every fit-width scale at dpr 2 (0.98 -> 17.2
+ * Mpx) plus a step or two beyond, and up to scale ~2.7 at dpr 1. Past it, tile.
+ */
+export const SINGLE_CANVAS_MAX_PIXELS = 32_000_000
+
+/**
+ * Whether this page can be rasterised as ONE canvas at the current scale.
+ *
+ * When it can, that is strictly better than a grid: one operator-list replay
+ * instead of N, no seams, and panning cannot invalidate it because there is
+ * only one cell. When it cannot, the grid earns its keep and is used unchanged.
+ */
+export function fitsSingleCanvas(
+  pageWidth: number,
+  pageHeight: number,
+  dpr: number,
+  budget = SINGLE_CANVAS_MAX_PIXELS
+): boolean {
+  const devicePixels = pageWidth * dpr * pageHeight * dpr
+  return Number.isFinite(devicePixels) && devicePixels > 0 && devicePixels <= budget
+}
+
+/** The single tile covering an entire page. See fitsSingleCanvas. */
+export function wholePageTile(pageWidth: number, pageHeight: number): Tile {
+  return { col: 0, row: 0, left: 0, top: 0, width: pageWidth, height: pageHeight }
+}
+
+/**
  * The tiles needed to cover `region` of a page that is `pageWidth` x
  * `pageHeight` CSS pixels at the current scale. Clipped to the page, so the
  * caller never rasterises past the sheet edge.

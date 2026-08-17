@@ -1,12 +1,15 @@
 import { strict as assert } from 'node:assert'
 import { describe, it } from 'vitest'
 import {
+  SINGLE_CANVAS_MAX_PIXELS,
   TILE_BUFFER_PX,
   TILE_PX,
   expandRegion,
+  fitsSingleCanvas,
   intersectRegion,
   scaleTileRect,
   tileKey,
+  wholePageTile,
   tileSetBounds,
   tilesCovering,
   type PageRegion
@@ -181,6 +184,62 @@ describe('tile grid', () => {
     assert.equal(at(4008), base, 'an 8px pan changed the tile set')
     assert.equal(at(4040), base, 'a 40px pan changed the tile set')
     assert.notEqual(at(4000 + TILE_PX * 2), base, 'a large pan should change the tile set')
+  })
+
+  it('uses ONE canvas across the whole fit-width range, at either dpr', () => {
+    // The real sheet geometry. Fit width measures 0.48-0.98 across viewports
+    // from a small laptop to a large desktop - see test/visiblePages.test.ts.
+    for (const dpr of [1, 2]) {
+      for (const scale of [0.48, 0.6, 0.73, 0.98]) {
+        assert.ok(
+          fitsSingleCanvas(SHEET_W * scale, SHEET_H * scale, dpr),
+          `scale ${scale} at dpr ${dpr} should not need a grid`
+        )
+      }
+    }
+  })
+
+  it('falls back to the grid once a full page canvas would cost too much', () => {
+    // A full page canvas is 4.478M * scale^2 * dpr^2 device pixels, so the
+    // 32 Mpx budget runs out around scale 1.34 at dpr 2 and 2.67 at dpr 1.
+    assert.equal(fitsSingleCanvas(SHEET_W * 1.3, SHEET_H * 1.3, 2), true)
+    assert.equal(fitsSingleCanvas(SHEET_W * 1.4, SHEET_H * 1.4, 2), false)
+    assert.equal(fitsSingleCanvas(SHEET_W * 2.6, SHEET_H * 2.6, 1), true)
+    assert.equal(fitsSingleCanvas(SHEET_W * 2.8, SHEET_H * 2.8, 1), false)
+    // And at the zoom range's top end it is never even close.
+    assert.equal(fitsSingleCanvas(SHEET_W * 8, SHEET_H * 8, 2), false)
+  })
+
+  it('keeps the single-canvas path far from the paint cliff too', () => {
+    // The grid's safety is that a tile is TILE_PX square at every scale. The
+    // single-canvas path has no such structural bound, so its budget IS the
+    // bound and it has to be checked: the page is only rendered as one canvas
+    // when the whole thing fits inside SINGLE_CANVAS_MAX_PIXELS.
+    assert.ok(
+      SINGLE_CANVAS_MAX_PIXELS < PAINT_CLIFF / 4,
+      `${SINGLE_CANVAS_MAX_PIXELS} leaves too little margin under the ${PAINT_CLIFF} px cliff`
+    )
+    for (const dpr of [1, 2, 3]) {
+      for (const scale of [0.1, 0.5, 1, 2, 4, 8, 12]) {
+        const w = SHEET_W * scale
+        const h = SHEET_H * scale
+        if (!fitsSingleCanvas(w, h, dpr)) continue
+        const tile = wholePageTile(w, h)
+        const px = Math.round(tile.width * dpr) * Math.round(tile.height * dpr)
+        assert.ok(px < PAINT_CLIFF, `scale ${scale} dpr ${dpr}: ${px} px is past the cliff`)
+        assert.ok(px <= SINGLE_CANVAS_MAX_PIXELS, `scale ${scale} dpr ${dpr}: over budget`)
+      }
+    }
+  })
+
+  it('covers the whole page in one cell, so panning cannot invalidate it', () => {
+    // The grid earns its keep by being aligned, so a pan inside the buffer
+    // needs no new tiles. A single cell that IS the page is trivially aligned:
+    // there is nothing a pan can move it off.
+    const tile = wholePageTile(1576, 1051)
+    assert.deepEqual(tile, { col: 0, row: 0, left: 0, top: 0, width: 1576, height: 1051 })
+    const bounds = tileSetBounds([tile])
+    assert.deepEqual(bounds, { left: 0, top: 0, width: 1576, height: 1051 })
   })
 
   it('re-places a tile from a previous zoom onto the current page box', () => {
