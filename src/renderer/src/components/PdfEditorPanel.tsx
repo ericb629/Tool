@@ -8,6 +8,7 @@ import ContextMenu from './ContextMenu'
 import { pdfPointToCanvas, pointerEventToPdfPoint } from '../pdf/coordinates'
 import { geometryIntersectsRect, hitTestGeometry } from '../pdf/hitTest'
 import { TOOL_BY_ID, isDrawingTool, type ToolId } from '../tools/registry'
+import { parseScaleString, SCALE_PRESETS } from '../pdf/scale'
 import type {
   LinearUnit,
   MarkupObject,
@@ -65,6 +66,15 @@ export default function PdfEditorPanel({
   const [measureUnit, setMeasureUnit] = useState<LinearUnit>('ft')
   const [menu, setMenu] = useState<{ x: number; y: number } | undefined>(undefined)
 
+  // Calibration has two input methods: measure a known distance on the page
+  // (the original flow, drawPoints + realDistance above), or type/pick the
+  // sheet's printed scale directly - which needs no points at all. viewedPage
+  // tracks which page a typed scale applies to, since there is nothing drawn
+  // to infer it from.
+  const [calibrationMode, setCalibrationMode] = useState<'distance' | 'scale'>('scale')
+  const [scaleText, setScaleText] = useState('')
+  const [viewedPage, setViewedPage] = useState(1)
+
   const tool = TOOL_BY_ID[activeToolId]
   const drawing = isDrawingTool(tool)
 
@@ -72,6 +82,7 @@ export default function PdfEditorPanel({
     setDrawPoints([])
     setDrawPage(undefined)
     setRealDistance('')
+    setScaleText('')
   }, [])
 
   // Esc cancels an in-progress draw and returns to Select; with nothing in
@@ -103,6 +114,10 @@ export default function PdfEditorPanel({
       if (event.button !== 0) return
       setMenu(undefined)
       const point = pointerEventToPdfPoint(context.viewport, context.canvas, event, context.origin)
+
+      // Scale-typed calibration needs no clicks on the page at all - it
+      // derives its reference line from the typed/picked scale instead.
+      if (drawing && tool.isCalibration && calibrationMode === 'scale') return
 
       if (drawing) {
         // A draw belongs to one page; mixing pages would mix coordinate spaces.
@@ -215,6 +230,15 @@ export default function PdfEditorPanel({
     setActiveToolId('select')
   }
 
+  const parsedScale = useMemo(() => parseScaleString(scaleText), [scaleText])
+
+  function commitScaleCalibration(): void {
+    if (!parsedScale) return
+    onSaveCalibration({ pageNumber: viewedPage, ...parsedScale })
+    cancelDraw()
+    setActiveToolId('select')
+  }
+
   function commitMarkup(): void {
     if (!tool.produces || !tool.buildGeometry || !tool.buildTakeoff) return
     if (drawPage === undefined || drawPoints.length < (tool.minPoints ?? 2)) return
@@ -293,6 +317,7 @@ export default function PdfEditorPanel({
         active={active}
         interaction={interaction}
         onDocumentLoaded={onDocumentLoaded}
+        onCurrentPageChange={setViewedPage}
         renderOverlay={renderOverlay}
         onPagePointerDown={handlePagePointerDown}
         onMarqueeComplete={handleMarquee}
@@ -314,30 +339,90 @@ export default function PdfEditorPanel({
         <div className="pdf-editor__prompt">
           <span>{tool.hint}</span>
           {tool.isCalibration ? (
-            drawPoints.length === 2 ? (
-              <>
-                <span>Distance on page {drawPage}:</span>
-                <input
-                  type="number"
-                  value={realDistance}
-                  onChange={(e) => setRealDistance(e.target.value)}
-                  placeholder="e.g. 100"
-                  autoFocus
-                />
-                <select value={calibrationUnit} onChange={(e) => setCalibrationUnit(e.target.value as LinearUnit)}>
-                  {LINEAR_UNITS.map((u) => (
-                    <option key={u} value={u}>
-                      {u}
-                    </option>
-                  ))}
-                </select>
-                <button onClick={commitCalibration} disabled={!Number.parseFloat(realDistance)}>
-                  Save calibration
-                </button>
-              </>
-            ) : (
-              <span>{drawPoints.length} of 2 points</span>
-            )
+            <>
+              <div className="pdf-editor__calibration-mode" role="radiogroup" aria-label="Calibration method">
+                <label>
+                  <input
+                    type="radio"
+                    name="calibration-mode"
+                    checked={calibrationMode === 'scale'}
+                    onChange={() => {
+                      cancelDraw()
+                      setCalibrationMode('scale')
+                    }}
+                  />
+                  Known scale
+                </label>
+                <label>
+                  <input
+                    type="radio"
+                    name="calibration-mode"
+                    checked={calibrationMode === 'distance'}
+                    onChange={() => {
+                      cancelDraw()
+                      setCalibrationMode('distance')
+                    }}
+                  />
+                  Known distance
+                </label>
+              </div>
+
+              {calibrationMode === 'distance' ? (
+                drawPoints.length === 2 ? (
+                  <>
+                    <span>Distance on page {drawPage}:</span>
+                    <input
+                      type="number"
+                      value={realDistance}
+                      onChange={(e) => setRealDistance(e.target.value)}
+                      placeholder="e.g. 100"
+                      autoFocus
+                    />
+                    <select value={calibrationUnit} onChange={(e) => setCalibrationUnit(e.target.value as LinearUnit)}>
+                      {LINEAR_UNITS.map((u) => (
+                        <option key={u} value={u}>
+                          {u}
+                        </option>
+                      ))}
+                    </select>
+                    <button onClick={commitCalibration} disabled={!Number.parseFloat(realDistance)}>
+                      Save calibration
+                    </button>
+                  </>
+                ) : (
+                  <span>{drawPoints.length} of 2 points</span>
+                )
+              ) : (
+                <>
+                  <span>Scale for page {viewedPage}:</span>
+                  <select
+                    value=""
+                    onChange={(e) => {
+                      if (e.target.value) setScaleText(e.target.value)
+                    }}
+                  >
+                    <option value="">Common scales…</option>
+                    {SCALE_PRESETS.map((preset) => (
+                      <option key={preset.value} value={preset.value}>
+                        {preset.label}
+                      </option>
+                    ))}
+                  </select>
+                  <input
+                    type="text"
+                    value={scaleText}
+                    onChange={(e) => setScaleText(e.target.value)}
+                    placeholder={`e.g. 1" = 50'`}
+                  />
+                  <button onClick={commitScaleCalibration} disabled={!parsedScale}>
+                    Save calibration
+                  </button>
+                  {scaleText && !parsedScale ? (
+                    <span className="pdf-editor__prompt-warning">Couldn&apos;t parse that scale.</span>
+                  ) : null}
+                </>
+              )}
+            </>
           ) : (
             <>
               <span>

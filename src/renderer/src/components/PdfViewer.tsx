@@ -45,6 +45,8 @@ interface PdfViewerProps {
   active?: boolean
   interaction: InteractionConfig
   onDocumentLoaded?: (pageCount: number) => void
+  /** Fires when the page centered in the viewport changes, e.g. for calibration-by-scale to know which page to stamp. */
+  onCurrentPageChange?: (pageNumber: number) => void
   renderOverlay?: (ctx: CanvasRenderingContext2D, context: PageOverlayContext) => void
   onPagePointerDown?: (event: React.PointerEvent<HTMLCanvasElement>, context: PageOverlayContext) => void
   onMarqueeComplete?: (selections: PageRectSelection[], additive: boolean) => void
@@ -62,6 +64,7 @@ export default function PdfViewer({
   active = true,
   interaction,
   onDocumentLoaded,
+  onCurrentPageChange,
   renderOverlay,
   onPagePointerDown,
   onMarqueeComplete,
@@ -416,6 +419,10 @@ export default function PdfViewer({
     })
     setCurrentPage(candidate)
   }, [anchoredScroll.top, containerSize.height, layout])
+
+  useEffect(() => {
+    onCurrentPageChange?.(currentPage)
+  }, [currentPage, onCurrentPageChange])
 
   /**
    * The on-screen region of each page, in that page's own CSS pixels, keyed by
