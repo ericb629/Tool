@@ -10,6 +10,8 @@ interface TabBarProps {
   onToggleDock: () => void
   onImportPdf: () => void
   openMenu: React.ReactNode
+  /** The markup tool icon strip - rendered first, pushed to the far left. */
+  toolBar?: React.ReactNode
 }
 
 export default function TabBar({
@@ -21,10 +23,13 @@ export default function TabBar({
   onClose,
   onToggleDock,
   onImportPdf,
-  openMenu
+  openMenu,
+  toolBar
 }: TabBarProps) {
   return (
     <div className="tab-bar">
+      {toolBar}
+      {toolBar ? <div className="markup-toolbar__separator" /> : null}
       <div className="tab-bar__tabs" role="tablist">
         {tabs.map((tab) => (
           <div

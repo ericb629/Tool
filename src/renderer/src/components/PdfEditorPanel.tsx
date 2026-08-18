@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Hand, MousePointer2 } from 'lucide-react'
 import PdfViewer, { type PageRectSelection } from './PdfViewer'
 import { resolveInteraction, type InteractionMode } from '../tools/interaction'
@@ -6,20 +6,26 @@ import type { PageOverlayContext } from './PdfPageCanvas'
 import ToolPalette from './ToolPalette'
 import ContextMenu from './ContextMenu'
 import { pdfPointToCanvas, pointerEventToPdfPoint } from '../pdf/coordinates'
-import { geometryIntersectsRect, hitTestGeometry } from '../pdf/hitTest'
+import { geometryIntersectsRect, geometryPoints, hitTestGeometry } from '../pdf/hitTest'
 import { TOOL_BY_ID, isDrawingTool, type ToolId } from '../tools/registry'
 import { parseScaleString, SCALE_PRESETS } from '../pdf/scale'
 import type {
+  AreaUnit,
   LinearUnit,
   MarkupObject,
   PageCalibration,
   PdfFileManifest,
   PdfPoint,
   QuantityResult,
-  Uuid
+  Uuid,
+  VolumeUnit
 } from '../../../shared/manifest'
 
 const LINEAR_UNITS: LinearUnit[] = ['ft', 'in', 'm', 'cm', 'mm']
+const AREA_UNITS: AreaUnit[] = ['sf', 'sy', 'm2', 'acre']
+const VOLUME_UNITS: VolumeUnit[] = ['cf', 'cy', 'm3']
+/** Geometry kinds that draw a closed, fillable boundary. */
+const CLOSED_GEOMETRY_KINDS = new Set(['polygon', 'rect'])
 /** Grab radius in SCREEN pixels; converted to user-space by dividing by scale. */
 const HIT_TOLERANCE_PX = 6
 
@@ -28,6 +34,14 @@ interface PdfEditorPanelProps {
   manifest: PdfFileManifest
   layerId: Uuid
   active?: boolean
+  /**
+   * Controlled: the tool strip for the four measuring tools lives in the
+   * TabBar (App), not in this component, so App owns which tool is active
+   * per tab and passes it down. Select/Pan/Calibrate are still chosen from
+   * the in-viewer ToolPalette, which calls onToolChange the same way.
+   */
+  toolId: ToolId
+  onToolChange: (id: ToolId) => void
   /** Derives a quantity for a specific markup, on demand. */
   quantityForMarkup: (markupId: Uuid) => QuantityResult | undefined
   onDocumentLoaded: (pageCount: number) => void
@@ -47,14 +61,17 @@ export default function PdfEditorPanel({
   manifest,
   layerId,
   active = true,
+  toolId,
+  onToolChange,
   quantityForMarkup,
   onDocumentLoaded,
   onSaveCalibration,
   onSaveMarkup
 }: PdfEditorPanelProps) {
-  // Tool choice and selection are per-tab session state: this component stays
-  // mounted per tab, so its state is per-tab for free.
-  const [activeToolId, setActiveToolId] = useState<ToolId>('select')
+  // Selection is per-tab session state: this component stays mounted per
+  // tab, so its state is per-tab for free. Tool CHOICE is controlled by App
+  // (see toolId/onToolChange above) so the markup toolbar in the TabBar can
+  // reach it, but each tab still keeps its own choice - App keys it by tab.
   const [interactionMode, setInteractionMode] = useState<InteractionMode>('mouse')
   const [selectedIds, setSelectedIds] = useState<Uuid[]>([])
 
@@ -64,6 +81,13 @@ export default function PdfEditorPanel({
   const [realDistance, setRealDistance] = useState('')
   const [calibrationUnit, setCalibrationUnit] = useState<LinearUnit>('ft')
   const [measureUnit, setMeasureUnit] = useState<LinearUnit>('ft')
+  const [areaUnit, setAreaUnit] = useState<AreaUnit>('sf')
+  // Depth is optional (Area tool only): left blank, the markup takes off as
+  // area; filled in, it switches to a volume takeoff (area x depth) - see
+  // ToolDefinition.supportsDepth.
+  const [depthValue, setDepthValue] = useState('')
+  const [depthUnit, setDepthUnit] = useState<LinearUnit>('ft')
+  const [volumeUnit, setVolumeUnit] = useState<VolumeUnit>('cy')
   const [menu, setMenu] = useState<{ x: number; y: number } | undefined>(undefined)
 
   // Calibration has two input methods: measure a known distance on the page
@@ -75,7 +99,7 @@ export default function PdfEditorPanel({
   const [scaleText, setScaleText] = useState('')
   const [viewedPage, setViewedPage] = useState(1)
 
-  const tool = TOOL_BY_ID[activeToolId]
+  const tool = TOOL_BY_ID[toolId]
   const drawing = isDrawingTool(tool)
 
   const cancelDraw = useCallback(() => {
@@ -83,7 +107,21 @@ export default function PdfEditorPanel({
     setDrawPage(undefined)
     setRealDistance('')
     setScaleText('')
+    setDepthValue('')
   }, [])
+
+  // toolId is controlled (App owns it, see PdfEditorPanelProps), so a change
+  // can arrive from outside this component - the markup toolbar in the
+  // TabBar - with no chance to cancelDraw() first. Catch every change here
+  // instead of at each call site, so in-progress points from tool A never
+  // leak into tool B regardless of where the switch came from.
+  const prevToolId = useRef(toolId)
+  useEffect(() => {
+    if (prevToolId.current !== toolId) {
+      prevToolId.current = toolId
+      cancelDraw()
+    }
+  }, [toolId, cancelDraw])
 
   // Esc cancels an in-progress draw and returns to Select; with nothing in
   // progress it clears the selection.
@@ -93,20 +131,14 @@ export default function PdfEditorPanel({
       if (event.key !== 'Escape') return
       setMenu(undefined)
       if (drawPoints.length > 0 || drawing) {
-        cancelDraw()
-        setActiveToolId('select')
+        onToolChange('select')
       } else {
         setSelectedIds([])
       }
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [active, drawing, drawPoints.length, cancelDraw])
-
-  function chooseTool(id: ToolId): void {
-    cancelDraw()
-    setActiveToolId(id)
-  }
+  }, [active, drawing, drawPoints.length, onToolChange])
 
   // ---- pointer on a page ---------------------------------------------
   const handlePagePointerDown = useCallback(
@@ -167,7 +199,16 @@ export default function PdfEditorPanel({
     (ctx: CanvasRenderingContext2D, context: PageOverlayContext) => {
       const { viewport, pageNumber } = context
 
-      const stroke = (points: PdfPoint[], color: string, width: number, dashed = false): void => {
+      // `closed` also fills the shape (lightly) so an area/circle markup
+      // reads as a region rather than just its boundary. `dots` marks each
+      // actual vertex - skipped for arcs, whose points are 48 samples along
+      // the curve, not places the user clicked.
+      const stroke = (
+        points: PdfPoint[],
+        color: string,
+        width: number,
+        { dashed = false, closed = false, dots = true }: { dashed?: boolean; closed?: boolean; dots?: boolean } = {}
+      ): void => {
         if (points.length === 0) return
         ctx.save()
         ctx.strokeStyle = color
@@ -181,12 +222,20 @@ export default function PdfEditorPanel({
           const p = pdfPointToCanvas(viewport, points[i])
           ctx.lineTo(p.x, p.y)
         }
-        ctx.stroke()
-        for (const point of points) {
-          const p = pdfPointToCanvas(viewport, point)
-          ctx.beginPath()
-          ctx.arc(p.x, p.y, 3, 0, Math.PI * 2)
+        if (closed) {
+          ctx.closePath()
+          ctx.globalAlpha = 0.15
           ctx.fill()
+          ctx.globalAlpha = 1
+        }
+        ctx.stroke()
+        if (dots) {
+          for (const point of points) {
+            const p = pdfPointToCanvas(viewport, point)
+            ctx.beginPath()
+            ctx.arc(p.x, p.y, 3, 0, Math.PI * 2)
+            ctx.fill()
+          }
         }
         ctx.restore()
       }
@@ -195,23 +244,39 @@ export default function PdfEditorPanel({
       if (page?.calibration) stroke([page.calibration.pointA, page.calibration.pointB], '#2a9d8f', 2)
 
       for (const markup of manifest.markups) {
-        if (markup.pageNumber !== pageNumber || markup.geometry.kind !== 'polyline') continue
+        if (markup.pageNumber !== pageNumber) continue
+        const points = geometryPoints(markup.geometry)
+        if (points.length === 0) continue
+        const geometry = markup.geometry
+        const isArc = geometry.kind === 'arc'
+        const fullSweep = geometry.kind === 'arc' && geometry.endAngle - geometry.startAngle >= 2 * Math.PI - 1e-9
+        const closed = CLOSED_GEOMETRY_KINDS.has(geometry.kind) || fullSweep
         const selected = selectedIds.includes(markup.id)
+        const opts = { closed, dots: !isArc }
         // Selected markups get a halo underneath, then the normal stroke.
-        if (selected) stroke(markup.geometry.points, '#4aa3ff', 8)
-        stroke(markup.geometry.points, selected ? '#ffffff' : '#e63946', 2)
+        if (selected) stroke(points, '#4aa3ff', 8, opts)
+        stroke(points, selected ? '#ffffff' : markup.style.color, 2, opts)
       }
 
       if (pageNumber === drawPage && drawPoints.length > 0) {
-        stroke(drawPoints, tool.isCalibration ? '#f4a261' : '#e63946', 2, true)
+        const color = tool.isCalibration ? '#f4a261' : tool.defaultColor
+        // A 2-point arc-producing tool (Circle) previews the real circle
+        // instead of the straight center-to-edge line a naive point-by-point
+        // stroke would draw - reuses buildGeometry rather than special-casing
+        // the tool by id.
+        const previewPoints =
+          tool.produces?.geometryKind === 'arc' && drawPoints.length === 2 && tool.buildGeometry
+            ? geometryPoints(tool.buildGeometry(drawPoints))
+            : drawPoints
+        stroke(previewPoints, color, 2, { dashed: true, dots: previewPoints === drawPoints })
       }
     },
     [manifest, selectedIds, drawPage, drawPoints, tool]
   )
 
   const overlayRevision = useMemo(
-    () => `${manifest.updatedAt}|${selectedIds.join(',')}|${drawPage}|${drawPoints.length}|${activeToolId}`,
-    [manifest.updatedAt, selectedIds, drawPage, drawPoints.length, activeToolId]
+    () => `${manifest.updatedAt}|${selectedIds.join(',')}|${drawPage}|${drawPoints.length}|${toolId}`,
+    [manifest.updatedAt, selectedIds, drawPage, drawPoints.length, toolId]
   )
 
   // ---- commit ---------------------------------------------------------
@@ -227,7 +292,7 @@ export default function PdfEditorPanel({
       unit: calibrationUnit
     })
     cancelDraw()
-    setActiveToolId('select')
+    onToolChange('select')
   }
 
   const parsedScale = useMemo(() => parseScaleString(scaleText), [scaleText])
@@ -236,24 +301,32 @@ export default function PdfEditorPanel({
     if (!parsedScale) return
     onSaveCalibration({ pageNumber: viewedPage, ...parsedScale })
     cancelDraw()
-    setActiveToolId('select')
+    onToolChange('select')
   }
 
   function commitMarkup(): void {
     if (!tool.produces || !tool.buildGeometry || !tool.buildTakeoff) return
     if (drawPage === undefined || drawPoints.length < (tool.minPoints ?? 2)) return
     const now = new Date().toISOString()
+    const depth = tool.supportsDepth ? Number.parseFloat(depthValue) : NaN
+    // Depth turns an area takeoff into a volume takeoff (area x depth) on
+    // the SAME geometry/MarkupType - see ToolDefinition.supportsDepth. Left
+    // blank, the tool's own declared takeoff (area) is used unchanged.
+    const takeoff =
+      tool.supportsDepth && Number.isFinite(depth) && depth > 0
+        ? { mode: 'volume' as const, unit: volumeUnit, depth, depthUnit }
+        : tool.buildTakeoff(tool.unitKind === 'area' ? areaUnit : measureUnit)
     onSaveMarkup({
       id: crypto.randomUUID(),
       pageNumber: drawPage,
       layerId,
-      // The tool declares its type and takeoff; validateMarkup in the main
-      // process still checks the pairing, so a tool cannot smuggle in an
+      // The tool declares its type; validateMarkup in the main process still
+      // checks the type/takeoff pairing, so a tool cannot smuggle in an
       // illegal combination.
       type: tool.produces.markupType,
-      takeoff: tool.buildTakeoff(measureUnit),
+      takeoff,
       geometry: tool.buildGeometry(drawPoints),
-      style: { color: '#e63946' },
+      style: { color: tool.defaultColor },
       createdAt: now,
       updatedAt: now
     })
@@ -264,7 +337,6 @@ export default function PdfEditorPanel({
   // See tools/interaction.ts for the right-drag rule.
   const interaction = useMemo(() => resolveInteraction(tool, interactionMode), [tool, interactionMode])
 
-  const anyCalibration = manifest.pages.some((p) => p.calibration)
   const selectedMarkup = selectedIds.length === 1 ? manifest.markups.find((m) => m.id === selectedIds[0]) : undefined
   // Derived from the SELECTED markup, on demand - never from session state.
   const selectedQuantity = selectedMarkup ? quantityForMarkup(selectedMarkup.id) : undefined
@@ -325,14 +397,7 @@ export default function PdfEditorPanel({
         overlayRevision={overlayRevision}
         statusBarSlot={modeToggle}
         statusBarEnd={quantityReadout}
-        paletteSlot={
-          <ToolPalette
-            activeToolId={activeToolId}
-            onSelect={chooseTool}
-            disabledToolIds={anyCalibration ? [] : ['linear']}
-            disabledReason="Calibrate a page first"
-          />
-        }
+        paletteSlot={<ToolPalette activeToolId={toolId} onSelect={onToolChange} />}
       />
 
       {drawing && (
@@ -431,19 +496,57 @@ export default function PdfEditorPanel({
               {drawPage !== undefined && !manifest.pages.some((p) => p.pageNumber === drawPage && p.calibration) ? (
                 <span className="pdf-editor__prompt-warning">This page is not calibrated.</span>
               ) : null}
-              <select value={measureUnit} onChange={(e) => setMeasureUnit(e.target.value as LinearUnit)}>
-                {LINEAR_UNITS.map((u) => (
-                  <option key={u} value={u}>
-                    {u}
-                  </option>
-                ))}
-              </select>
+              {tool.unitKind === 'area' ? (
+                <select value={areaUnit} onChange={(e) => setAreaUnit(e.target.value as AreaUnit)}>
+                  {AREA_UNITS.map((u) => (
+                    <option key={u} value={u}>
+                      {u}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <select value={measureUnit} onChange={(e) => setMeasureUnit(e.target.value as LinearUnit)}>
+                  {LINEAR_UNITS.map((u) => (
+                    <option key={u} value={u}>
+                      {u}
+                    </option>
+                  ))}
+                </select>
+              )}
+              {tool.supportsDepth ? (
+                <>
+                  <span>Depth (optional):</span>
+                  <input
+                    type="number"
+                    value={depthValue}
+                    onChange={(e) => setDepthValue(e.target.value)}
+                    placeholder="e.g. 1"
+                    style={{ width: '4em' }}
+                  />
+                  <select value={depthUnit} onChange={(e) => setDepthUnit(e.target.value as LinearUnit)}>
+                    {LINEAR_UNITS.map((u) => (
+                      <option key={u} value={u}>
+                        {u}
+                      </option>
+                    ))}
+                  </select>
+                  {Number.parseFloat(depthValue) > 0 ? (
+                    <select value={volumeUnit} onChange={(e) => setVolumeUnit(e.target.value as VolumeUnit)}>
+                      {VOLUME_UNITS.map((u) => (
+                        <option key={u} value={u}>
+                          {u}
+                        </option>
+                      ))}
+                    </select>
+                  ) : null}
+                </>
+              ) : null}
               <button onClick={commitMarkup} disabled={drawPoints.length < (tool.minPoints ?? 2)}>
                 Finish
               </button>
             </>
           )}
-          <button onClick={() => { cancelDraw(); setActiveToolId('select') }}>Cancel (Esc)</button>
+          <button onClick={() => onToolChange('select')}>Cancel (Esc)</button>
         </div>
       )}
 

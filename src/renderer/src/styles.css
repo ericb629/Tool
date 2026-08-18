@@ -891,6 +891,67 @@ body,
   min-height: 34px;
 }
 
+.markup-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+}
+
+.markup-toolbar__button {
+  display: flex;
+  align-items: center;
+  height: 26px;
+  padding: 0 5px;
+  background: transparent;
+  color: #ccc;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  cursor: pointer;
+  align-self: center;
+}
+
+.markup-toolbar__button:hover:not(:disabled) {
+  background: #3a3a3a;
+  color: #fff;
+}
+
+.markup-toolbar__button--active {
+  background: #4a4a4a;
+  border-color: #6a6a6a;
+  color: #fff;
+}
+
+.markup-toolbar__button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* Label reveals on hover/focus rather than a native tooltip, per the strip's
+   design - it stays a strip of icons and only expands the one you're on. */
+.markup-toolbar__label {
+  max-width: 0;
+  overflow: hidden;
+  opacity: 0;
+  white-space: nowrap;
+  font-size: 11px;
+  transition: max-width 0.15s ease, opacity 0.15s ease, margin-left 0.15s ease;
+}
+
+.markup-toolbar__button:hover .markup-toolbar__label,
+.markup-toolbar__button:focus-visible .markup-toolbar__label {
+  max-width: 80px;
+  opacity: 1;
+  margin-left: 6px;
+}
+
+.markup-toolbar__separator {
+  width: 1px;
+  align-self: stretch;
+  margin: 6px 4px;
+  background: #3a3a3a;
+}
+
 .tab-bar__tabs {
   display: flex;
   align-items: stretch;

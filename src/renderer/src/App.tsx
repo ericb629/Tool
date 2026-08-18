@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import AboutDialog from './components/AboutDialog'
 import LiveLinkPanel from './components/LiveLinkPanel'
+import MarkupToolBar from './components/MarkupToolBar'
 import type { MenuBarMenu } from './components/MenuBar'
 import PdfEditorPanel from './components/PdfEditorPanel'
 import SpreadsheetPanel, { TAKEOFF_ROW_INDEX, TAKEOFF_SHEET_NAME } from './components/SpreadsheetPanel'
 import TabBar from './components/TabBar'
 import TitleBar from './components/TitleBar'
 import { describeFileStatus } from './fileStatus'
+import type { ToolId } from './tools/registry'
 import type { LiveLinkPlacement, Tab } from './tabs/types'
 import {
   deriveQuantity,
@@ -42,6 +44,11 @@ export default function App() {
   const [liveLinkPlacement, setLiveLinkPlacement] = useState<LiveLinkPlacement>('sidebar')
   const [openMenuVisible, setOpenMenuVisible] = useState(false)
   const [aboutOpen, setAboutOpen] = useState(false)
+  // Tool CHOICE lives here, keyed by tab id, because the markup tool strip
+  // is in the TabBar (App-level) rather than inside PdfEditorPanel - but
+  // each PDF tab still remembers its own tool, same as before the strip
+  // moved out. Selection stays inside PdfEditorPanel; only choice moved.
+  const [toolByTab, setToolByTab] = useState<Record<string, ToolId>>({})
 
   // Live Link is synthesized rather than stored, so docking is just a
   // question of where it renders - the tab list never has to be rewritten.
@@ -211,6 +218,8 @@ export default function App() {
             fileId={tab.fileId}
             manifest={entry.manifest}
             layerId={layerId}
+            toolId={toolByTab[tab.id] ?? 'select'}
+            onToolChange={(id) => setToolByTab((prev) => ({ ...prev, [tab.id]: id }))}
             quantityForMarkup={(markupId) => quantityFor(tab.fileId, markupId)}
             active={isActive}
             onDocumentLoaded={(pageCount) => handleDocumentLoaded(tab.fileId, pageCount)}
@@ -278,6 +287,23 @@ export default function App() {
   const activeTab = displayedTabs.find((t) => t.id === activeTabId)
   const NOT_BUILT = 'Not built yet'
 
+  // The markup tool strip (Linear/Polyline/Area/Circle) only means anything
+  // against the active PDF tab's page calibration - same gating ToolPalette
+  // used to do for these tools before they moved out to the TabBar.
+  const activePdfManifest =
+    activeTab?.kind === 'pdf'
+      ? (() => {
+          const entry = projectState?.files.find((f) => f.fileId === activeTab.fileId)
+          return entry?.manifest.fileType === 'pdf' ? entry.manifest : undefined
+        })()
+      : undefined
+  const markupToolsDisabled = !activePdfManifest || !activePdfManifest.pages.some((p) => p.calibration)
+  const markupToolsDisabledReason = !activePdfManifest ? 'Open a PDF to use these tools' : 'Calibrate a page first'
+  const activeMarkupToolId: ToolId = activeTab ? (toolByTab[activeTab.id] ?? 'select') : 'select'
+  function setActiveMarkupTool(id: ToolId): void {
+    if (activeTab) setToolByTab((prev) => ({ ...prev, [activeTab.id]: id }))
+  }
+
   const menus: MenuBarMenu[] = [
     {
       id: 'tool',
@@ -335,6 +361,14 @@ export default function App() {
         onClose={closeTab}
         onToggleDock={() => setLiveLinkPlacement((p) => (p === 'sidebar' ? 'tab' : 'sidebar'))}
         onImportPdf={handleImportPdf}
+        toolBar={
+          <MarkupToolBar
+            activeToolId={activeMarkupToolId}
+            onSelect={setActiveMarkupTool}
+            disabled={markupToolsDisabled}
+            disabledReason={markupToolsDisabledReason}
+          />
+        }
         openMenu={
           <div className="open-menu">
             <button disabled={!projectState} onClick={() => setOpenMenuVisible((v) => !v)}>
