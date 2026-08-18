@@ -29,6 +29,9 @@ export default function LiveLinkPanel({
           placeholder="Project folder path"
           value={folderPath}
           onChange={(e) => setFolderPath(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && folderPath) onOpenProject(folderPath)
+          }}
         />
         <button onClick={() => onOpenProject(folderPath)} disabled={!folderPath}>
           Open

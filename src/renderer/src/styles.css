@@ -514,7 +514,10 @@ body,
 
 .pdf-page {
   position: relative;
-  background: #fff;
+  /* Shows only in the gap before the preview/tile canvases paint over it -
+     replaces the old flat white with a loading-state gradient: metallic
+     gray at the top-left fading through dark blue into light blue. */
+  background: linear-gradient(135deg, #7b828c 0%, #454f60 30%, #14233b 55%, #2f6a9e 78%, #a9d8f0 100%);
   box-shadow: 0 1px 6px rgba(0, 0, 0, 0.5);
   /* Defensive, not load-bearing: the canvas is sized from the same viewport
      helper as this slot, so it should always fit exactly. When it did not -
@@ -669,6 +672,18 @@ body,
   color: #e0a458;
 }
 
+.pdf-editor__calibration-mode {
+  display: flex;
+  gap: 12px;
+}
+
+.pdf-editor__calibration-mode label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+}
+
 .spreadsheet-panel {
   width: 100%;
   height: 100%;
@@ -744,6 +759,126 @@ body,
   flex-direction: column;
   background: #1e1e1e;
   color: #e8e8e8;
+}
+
+.title-bar {
+  display: flex;
+  align-items: stretch;
+  height: 32px;
+  background: #181818;
+  border-bottom: 1px solid #3a3a3a;
+  flex: none;
+  /* This row IS the title bar (frame: false, main/index.ts) - dragging it
+     moves the window. The menu and window-control buttons carve themselves
+     out with no-drag below so their clicks still land. */
+  -webkit-app-region: drag;
+}
+
+.title-bar__drag-region {
+  flex: 1;
+  -webkit-app-region: drag;
+}
+
+.menu-bar {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  padding: 0 4px;
+  flex: none;
+  -webkit-app-region: no-drag;
+}
+
+.menu-bar__menu {
+  position: relative;
+  display: flex;
+}
+
+.window-controls {
+  display: flex;
+  align-items: stretch;
+  flex: none;
+  -webkit-app-region: no-drag;
+}
+
+.window-controls__button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 46px;
+  background: transparent;
+  color: #ccc;
+  border: none;
+  cursor: pointer;
+}
+
+.window-controls__button:hover {
+  background: #3a3a3a;
+  color: #fff;
+}
+
+.window-controls__button--close:hover {
+  background: #e81123;
+  color: #fff;
+}
+
+.menu-bar__button {
+  background: transparent;
+  color: #ccc;
+  border: none;
+  padding: 3px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.menu-bar__button:hover,
+.menu-bar__button--active {
+  background: #3a3a3a;
+  color: #fff;
+}
+
+.menu-bar__list {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  z-index: 30;
+  list-style: none;
+  margin: 2px 0 0;
+  padding: 4px;
+  min-width: 200px;
+  background: #2a2a2a;
+  border: 1px solid #4a4a4a;
+  border-radius: 4px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+}
+
+.menu-bar__list button {
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  color: #ddd;
+  font-size: 12px;
+  padding: 5px 8px;
+  border-radius: 3px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.menu-bar__list button:hover:not(:disabled) {
+  background: #4a4a4a;
+  color: #fff;
+}
+
+.menu-bar__list button:disabled {
+  color: #777;
+  cursor: default;
+}
+
+.menu-bar__empty {
+  color: #888;
+  font-size: 12px;
+  padding: 5px 8px;
+  white-space: nowrap;
 }
 
 .tab-bar {
@@ -931,6 +1066,60 @@ body,
   background: #1e1e1e;
   display: flex;
   min-height: 0;
+}
+
+.about-dialog__backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.about-dialog {
+  background: #262626;
+  border: 1px solid #4a4a4a;
+  border-radius: 6px;
+  padding: 20px 24px;
+  min-width: 280px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.6);
+  color: #e8e8e8;
+}
+
+.about-dialog h2 {
+  margin: 0 0 4px;
+  font-size: 15px;
+}
+
+.about-dialog p {
+  margin: 4px 0;
+  font-size: 12px;
+  color: #aaa;
+}
+
+.about-dialog__versions {
+  margin-top: 10px;
+  font-size: 11px;
+  color: #888;
+}
+
+.about-dialog__versions div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.about-dialog button {
+  margin-top: 16px;
+  background: #3a3a3a;
+  color: #e8e8e8;
+  border: 1px solid #4a4a4a;
+  border-radius: 3px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
 }
 
 /* ---- tools, marquee, context menu ---- */

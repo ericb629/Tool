@@ -43,6 +43,19 @@ const api = {
     updateLink: (link: LinkRecord): Promise<void> => ipcRenderer.invoke('manifest:updateLink', link),
     save: (): Promise<void> => ipcRenderer.invoke('manifest:save'),
     getState: (): Promise<ProjectState> => ipcRenderer.invoke('manifest:getState')
+  },
+  // The window is frameless (see main/index.ts) - the custom title bar
+  // drives minimize/maximize/close through here instead of native chrome.
+  windowControls: {
+    minimize: (): Promise<void> => ipcRenderer.invoke('windowControls:minimize'),
+    toggleMaximize: (): Promise<void> => ipcRenderer.invoke('windowControls:toggleMaximize'),
+    close: (): Promise<void> => ipcRenderer.invoke('windowControls:close'),
+    isMaximized: (): Promise<boolean> => ipcRenderer.invoke('windowControls:isMaximized'),
+    onMaximizedChanged: (callback: (maximized: boolean) => void): (() => void) => {
+      const listener = (_event: unknown, maximized: boolean): void => callback(maximized)
+      ipcRenderer.on('windowControls:maximizedChanged', listener)
+      return () => ipcRenderer.removeListener('windowControls:maximizedChanged', listener)
+    }
   }
 }
 

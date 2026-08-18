@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import AboutDialog from './components/AboutDialog'
 import LiveLinkPanel from './components/LiveLinkPanel'
+import type { MenuBarMenu } from './components/MenuBar'
 import PdfEditorPanel from './components/PdfEditorPanel'
 import SpreadsheetPanel, { TAKEOFF_ROW_INDEX, TAKEOFF_SHEET_NAME } from './components/SpreadsheetPanel'
 import TabBar from './components/TabBar'
+import TitleBar from './components/TitleBar'
 import { describeFileStatus } from './fileStatus'
 import type { LiveLinkPlacement, Tab } from './tabs/types'
 import {
@@ -38,6 +41,7 @@ export default function App() {
   const [activeTabId, setActiveTabId] = useState<string | undefined>(undefined)
   const [liveLinkPlacement, setLiveLinkPlacement] = useState<LiveLinkPlacement>('sidebar')
   const [openMenuVisible, setOpenMenuVisible] = useState(false)
+  const [aboutOpen, setAboutOpen] = useState(false)
 
   // Live Link is synthesized rather than stored, so docking is just a
   // question of where it renders - the tab list never has to be rewritten.
@@ -263,8 +267,65 @@ export default function App() {
     />
   )
 
+  // The project-open/create controls live on LiveLinkPanel, not in a
+  // separate dialog - "New Project" and "Open Project" both just surface it.
+  // When it's docked as the sidebar it's already visible; when it's a tab,
+  // switch to it.
+  function focusProjectControls(): void {
+    if (liveLinkPlacement === 'tab') setActiveTabId(LIVE_LINK_TAB_ID)
+  }
+
+  const activeTab = displayedTabs.find((t) => t.id === activeTabId)
+  const NOT_BUILT = 'Not built yet'
+
+  const menus: MenuBarMenu[] = [
+    {
+      id: 'tool',
+      label: 'Tool',
+      items: [
+        { label: 'About Tool', onClick: () => setAboutOpen(true) },
+        { label: 'Preferences…', disabled: true, title: NOT_BUILT },
+        { label: 'Profile…', disabled: true, title: NOT_BUILT },
+        { label: 'Exit', onClick: () => window.close() }
+      ]
+    },
+    {
+      id: 'file',
+      label: 'File',
+      items: [
+        { label: 'New Project…', onClick: focusProjectControls },
+        { label: 'Open Project…', onClick: focusProjectControls },
+        { label: 'Import PDF…', disabled: !projectState, onClick: handleImportPdf },
+        {
+          label: 'Save',
+          disabled: !projectState,
+          onClick: () => {
+            void window.api.manifest.save()
+          }
+        },
+        { label: 'Save As…', disabled: true, title: NOT_BUILT },
+        { label: 'Print…', disabled: true, title: NOT_BUILT },
+        { label: 'Close Tab', disabled: !activeTab?.closeable, onClick: () => activeTab && closeTab(activeTab.id) }
+      ]
+    },
+    { id: 'view', label: 'View', items: [], emptyLabel: 'No view options yet' },
+    {
+      id: 'document',
+      label: 'Document',
+      items: [
+        { label: 'Rotate Page…', disabled: true, title: NOT_BUILT },
+        { label: 'Insert Pages…', disabled: true, title: NOT_BUILT },
+        { label: 'Extract Pages…', disabled: true, title: NOT_BUILT },
+        { label: 'Delete Page…', disabled: true, title: NOT_BUILT }
+      ]
+    },
+    { id: 'tools', label: 'Tools', items: [], emptyLabel: 'No tools here yet' }
+  ]
+
   return (
     <div className="app">
+      <TitleBar menus={menus} />
+      {aboutOpen ? <AboutDialog onClose={() => setAboutOpen(false)} /> : null}
       <TabBar
         tabs={displayedTabs}
         activeTabId={activeTabId}

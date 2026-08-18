@@ -2,6 +2,7 @@ import { app, BrowserWindow, shell } from 'electron'
 import { join } from 'path'
 import { registerManifestIpcHandlers } from './ipc/manifest'
 import { registerPdfDataIpcHandlers } from './ipc/pdfData'
+import { registerWindowControlIpcHandlers } from './ipc/windowControls'
 import { ManifestStore } from './manifest/store'
 import { PdfDataReader } from './pdfData'
 
@@ -12,7 +13,10 @@ function createWindow(): void {
     minWidth: 800,
     minHeight: 600,
     show: false,
-    autoHideMenuBar: true,
+    // Frameless: the renderer draws its own title bar (menu bar on the
+    // left, minimize/maximize/close on the right) instead of relying on
+    // the OS one - see components/TitleBar.tsx and ipc/windowControls.ts.
+    frame: false,
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
@@ -20,6 +24,8 @@ function createWindow(): void {
       sandbox: false
     }
   })
+
+  registerWindowControlIpcHandlers(mainWindow)
 
   mainWindow.once('ready-to-show', () => {
     mainWindow.show()
