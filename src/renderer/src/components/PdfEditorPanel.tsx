@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Hand, MousePointer2 } from 'lucide-react'
+import type { PDFDocumentProxy } from 'pdfjs-dist'
 import PdfViewer, { type PageRectSelection } from './PdfViewer'
 import { resolveInteraction, type InteractionMode } from '../tools/interaction'
 import type { PageOverlayContext } from './PdfPageCanvas'
@@ -9,6 +10,7 @@ import { pdfPointToCanvas, pointerEventToPdfPoint } from '../pdf/coordinates'
 import { geometryIntersectsRect, geometryPoints, hitTestGeometry } from '../pdf/hitTest'
 import { TOOL_BY_ID, isDrawingTool, type ToolId } from '../tools/registry'
 import { parseScaleString, SCALE_PRESETS } from '../pdf/scale'
+import { extractTextInRect, pageHasTextLayer, type TextRun } from '../pdf/textExtract'
 import type {
   AreaUnit,
   LinearUnit,
@@ -29,6 +31,13 @@ const CLOSED_GEOMETRY_KINDS = new Set(['polygon', 'rect'])
 /** Grab radius in SCREEN pixels; converted to user-space by dividing by scale. */
 const HIT_TOLERANCE_PX = 6
 
+interface DrawOpts {
+  dashed?: boolean
+  closed?: boolean
+  dots?: boolean
+  dotRadius?: number
+}
+
 interface PdfEditorPanelProps {
   fileId: Uuid
   manifest: PdfFileManifest
@@ -47,6 +56,16 @@ interface PdfEditorPanelProps {
   onDocumentLoaded: (pageCount: number) => void
   onSaveCalibration: (calibration: PageCalibration) => void
   onSaveMarkup: (markup: MarkupObject) => void
+  /**
+   * Drag-box text extraction (Extract Text tool) writes into whichever cell
+   * is currently active in the spreadsheet panel - that's App-level state,
+   * not this tab's. Returns an error message to show inline if there is
+   * nowhere to put the text (e.g. no cell has been clicked yet); undefined
+   * means it was written.
+   */
+  onExtractText?: (text: string) => string | undefined
+  /** "B3", shown so the user can see the extraction target before dragging. */
+  activeCellLabel?: string
 }
 
 function formatQuantity(result: QuantityResult | undefined): string {
@@ -66,7 +85,9 @@ export default function PdfEditorPanel({
   quantityForMarkup,
   onDocumentLoaded,
   onSaveCalibration,
-  onSaveMarkup
+  onSaveMarkup,
+  onExtractText,
+  activeCellLabel
 }: PdfEditorPanelProps) {
   // Selection is per-tab session state: this component stays mounted per
   // tab, so its state is per-tab for free. Tool CHOICE is controlled by App
@@ -78,6 +99,9 @@ export default function PdfEditorPanel({
   // In-progress draw. Points are PdfPoints - no pixel ever enters state.
   const [drawPage, setDrawPage] = useState<number | undefined>(undefined)
   const [drawPoints, setDrawPoints] = useState<PdfPoint[]>([])
+  // Points popped by Ctrl+Z, restorable by Ctrl+R - see ToolDefinition.supportsPointUndo.
+  // Placing a new point (not a redo) clears it, same as any editor's undo stack.
+  const [redoStack, setRedoStack] = useState<PdfPoint[]>([])
   const [realDistance, setRealDistance] = useState('')
   const [calibrationUnit, setCalibrationUnit] = useState<LinearUnit>('ft')
   const [measureUnit, setMeasureUnit] = useState<LinearUnit>('ft')
@@ -99,6 +123,15 @@ export default function PdfEditorPanel({
   const [scaleText, setScaleText] = useState('')
   const [viewedPage, setViewedPage] = useState(1)
 
+  // The opened document, held only for on-demand getTextContent() calls from
+  // the Extract Text tool - rendering never reads this ref, PdfViewer owns
+  // its own `doc` for that. A ref because it does not need to trigger a
+  // render; extraction reads it at drag-completion time, not render time.
+  const docRef = useRef<PDFDocumentProxy | undefined>(undefined)
+  const [extractStatus, setExtractStatus] = useState<{ kind: 'error' | 'info'; message: string } | undefined>(
+    undefined
+  )
+
   const tool = TOOL_BY_ID[toolId]
   const drawing = isDrawingTool(tool)
 
@@ -108,7 +141,29 @@ export default function PdfEditorPanel({
     setRealDistance('')
     setScaleText('')
     setDepthValue('')
+    setRedoStack([])
   }, [])
+
+  // Ctrl+Z / Ctrl+R step back/forward through the in-progress draw's points
+  // (see ToolDefinition.supportsPointUndo). Each does exactly one setState
+  // call per array, reading the other from render scope rather than nesting
+  // a setState inside another's functional updater - StrictMode invokes
+  // updater functions twice to check purity, so a setRedoStack nested inside
+  // setDrawPoints's updater silently ran twice per keypress, duplicating
+  // entries and producing exactly the "needs two presses" drift this was.
+  const undoPoint = useCallback(() => {
+    if (drawPoints.length === 0) return
+    const popped = drawPoints[drawPoints.length - 1]
+    setRedoStack((prev) => [...prev, popped])
+    setDrawPoints((prev) => prev.slice(0, -1))
+  }, [drawPoints])
+
+  const redoPoint = useCallback(() => {
+    if (redoStack.length === 0) return
+    const restored = redoStack[redoStack.length - 1]
+    setDrawPoints((prev) => [...prev, restored])
+    setRedoStack((prev) => prev.slice(0, -1))
+  }, [redoStack])
 
   // toolId is controlled (App owns it, see PdfEditorPanelProps), so a change
   // can arrive from outside this component - the markup toolbar in the
@@ -120,6 +175,7 @@ export default function PdfEditorPanel({
     if (prevToolId.current !== toolId) {
       prevToolId.current = toolId
       cancelDraw()
+      setExtractStatus(undefined)
     }
   }, [toolId, cancelDraw])
 
@@ -140,12 +196,72 @@ export default function PdfEditorPanel({
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [active, drawing, drawPoints.length, onToolChange])
 
+  // Ctrl+Z/Ctrl+R undo/redo the in-progress draw's points. preventDefault so
+  // Ctrl+R does not fall through to any default reload behavior.
+  useEffect(() => {
+    if (!active || !drawing || !tool.supportsPointUndo) return
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (!event.ctrlKey) return
+      if (event.key === 'z' || event.key === 'Z') {
+        event.preventDefault()
+        undoPoint()
+      } else if (event.key === 'r' || event.key === 'R') {
+        event.preventDefault()
+        redoPoint()
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [active, drawing, tool, undoPoint, redoPoint])
+
+  // ---- commit (defined before handlePagePointerDown/handlePageDoubleClick,
+  // which call it) -------------------------------------------------------
+  // Takes an explicit points array (defaulting to current state) so the
+  // double-click handler can commit with a trimmed list in the SAME event,
+  // without waiting a render for setDrawPoints to land first.
+  const commitMarkup = useCallback(
+    (points: PdfPoint[] = drawPoints): void => {
+      if (!tool.produces || !tool.buildGeometry || !tool.buildTakeoff) return
+      if (drawPage === undefined || points.length < (tool.minPoints ?? 2)) return
+      const now = new Date().toISOString()
+      const depth = tool.supportsDepth ? Number.parseFloat(depthValue) : NaN
+      // Depth turns an area takeoff into a volume takeoff (area x depth) on
+      // the SAME geometry/MarkupType - see ToolDefinition.supportsDepth. Left
+      // blank, the tool's own declared takeoff (area) is used unchanged.
+      const takeoff =
+        tool.supportsDepth && Number.isFinite(depth) && depth > 0
+          ? { mode: 'volume' as const, unit: volumeUnit, depth, depthUnit }
+          : tool.buildTakeoff(tool.unitKind === 'area' ? areaUnit : measureUnit)
+      onSaveMarkup({
+        id: crypto.randomUUID(),
+        pageNumber: drawPage,
+        layerId,
+        // The tool declares its type; validateMarkup in the main process still
+        // checks the type/takeoff pairing, so a tool cannot smuggle in an
+        // illegal combination.
+        type: tool.produces.markupType,
+        takeoff,
+        geometry: tool.buildGeometry(points),
+        style: { color: tool.defaultColor },
+        createdAt: now,
+        updatedAt: now
+      })
+      cancelDraw()
+    },
+    [tool, drawPage, drawPoints, depthValue, volumeUnit, depthUnit, areaUnit, measureUnit, layerId, onSaveMarkup, cancelDraw]
+  )
+
   // ---- pointer on a page ---------------------------------------------
   const handlePagePointerDown = useCallback(
     (event: React.PointerEvent<HTMLCanvasElement>, context: PageOverlayContext) => {
       if (event.button !== 0) return
       setMenu(undefined)
       const point = pointerEventToPdfPoint(context.viewport, context.canvas, event, context.origin)
+
+      // Extract Text's whole gesture is the marquee drag handled below in
+      // handleMarquee - a plain click here has nothing to do (in particular,
+      // not fall through to selecting whatever markup happens to be under it).
+      if (tool.dragRect) return
 
       // Scale-typed calibration needs no clicks on the page at all - it
       // derives its reference line from the typed/picked scale instead.
@@ -154,11 +270,18 @@ export default function PdfEditorPanel({
       if (drawing) {
         // A draw belongs to one page; mixing pages would mix coordinate spaces.
         if (drawPage !== undefined && drawPage !== context.pageNumber) return
+
+        // Every click places a point, including the first of a double-click
+        // pair - handlePageDoubleClick trims that extra one back off when it
+        // fires right after. PointerEvent.detail is NOT a reliable click-count
+        // signal here, so double-click detection lives entirely there instead.
         setDrawPage(context.pageNumber)
         setDrawPoints((prev) => {
           const next = [...prev, point]
           return tool.exactPoints && next.length > tool.exactPoints ? [point] : next
         })
+        // A new point invalidates whatever Ctrl+Z had queued for redo.
+        setRedoStack([])
         return
       }
 
@@ -177,11 +300,77 @@ export default function PdfEditorPanel({
         additive ? (prev.includes(hit.id) ? prev.filter((id) => id !== hit.id) : [...prev, hit.id]) : [hit.id]
       )
     },
-    [drawing, drawPage, tool, manifest]
+    [drawing, drawPage, tool, manifest, calibrationMode]
+  )
+
+  // A double-click's second pointerdown already placed a point identical (or
+  // very close) to the first - drop it before committing, so the shape ends
+  // where the user's first click of the pair landed, not with a spurious
+  // extra vertex. Uses the native `dblclick` event (via PdfPageCanvas),
+  // unlike PointerEvent.detail, this reliably fires exactly once per pair.
+  const handlePageDoubleClick = useCallback(
+    (event: React.MouseEvent<HTMLCanvasElement>, context: PageOverlayContext) => {
+      if (!drawing || !tool.dblClickFinish) return
+      if (drawPage !== undefined && drawPage !== context.pageNumber) return
+      event.preventDefault()
+      const trimmed = drawPoints.length > 0 ? drawPoints.slice(0, -1) : drawPoints
+      commitMarkup(trimmed)
+    },
+    [drawing, tool, drawPage, drawPoints, commitMarkup]
+  )
+
+  // Extract Text's whole job: pull the text under a dragged box into the
+  // spreadsheet's active cell. Async because getPage/getTextContent are -
+  // handleMarquee itself stays sync and just fires this without awaiting it.
+  const handleExtractRect = useCallback(
+    async (selection: PageRectSelection) => {
+      const doc = docRef.current
+      if (!doc) {
+        setExtractStatus({ kind: 'error', message: 'Document is still loading - try again in a moment.' })
+        return
+      }
+      const page = await doc.getPage(selection.pageNumber)
+      const content = await page.getTextContent()
+      // includeMarkedContent is not requested, so every item is a real
+      // TextItem - filtered/mapped anyway since the union type does not
+      // guarantee it (and pdfjs-dist does not export TextItem from its
+      // public entry point, so this reads the fields structurally instead).
+      const runs: TextRun[] = content.items.flatMap((item) =>
+        'str' in item && 'transform' in item && 'width' in item && 'height' in item
+          ? [{ str: item.str, transform: item.transform, width: item.width, height: item.height }]
+          : []
+      )
+
+      if (!pageHasTextLayer(runs)) {
+        setExtractStatus({
+          kind: 'error',
+          message: `Page ${selection.pageNumber} has no extractable text - it's a scanned image, not a text layer.`
+        })
+        return
+      }
+
+      const text = extractTextInRect(runs, selection.rect)
+      if (!text) {
+        setExtractStatus({ kind: 'info', message: 'No text found in that box.' })
+        return
+      }
+
+      const error = onExtractText?.(text)
+      setExtractStatus(
+        error ? { kind: 'error', message: error } : { kind: 'info', message: `Extracted: "${text}"` }
+      )
+    },
+    [onExtractText]
   )
 
   const handleMarquee = useCallback(
     (selections: PageRectSelection[], additive: boolean) => {
+      if (tool.dragRect) {
+        // A drag box belongs to whichever page it started on; spanning pages
+        // is not meaningful for a single extracted cell value.
+        if (selections.length > 0) void handleExtractRect(selections[0])
+        return
+      }
       const hits: Uuid[] = []
       for (const { pageNumber, rect } of selections) {
         for (const markup of manifest.markups) {
@@ -191,7 +380,7 @@ export default function PdfEditorPanel({
       }
       setSelectedIds((prev) => (additive ? Array.from(new Set([...prev, ...hits])) : hits))
     },
-    [manifest]
+    [manifest, tool, handleExtractRect]
   )
 
   // ---- overlay --------------------------------------------------------
@@ -201,13 +390,14 @@ export default function PdfEditorPanel({
 
       // `closed` also fills the shape (lightly) so an area/circle markup
       // reads as a region rather than just its boundary. `dots` marks each
-      // actual vertex - skipped for arcs, whose points are 48 samples along
-      // the curve, not places the user clicked.
+      // actual vertex, small and only when the caller asks for them - a
+      // committed markup shows them only while selected, so an unselected
+      // line/area/circle reads as a clean shape rather than a dotted one.
       const stroke = (
         points: PdfPoint[],
         color: string,
         width: number,
-        { dashed = false, closed = false, dots = true }: { dashed?: boolean; closed?: boolean; dots?: boolean } = {}
+        { dashed = false, closed = false, dots = true, dotRadius = 3 }: DrawOpts = {}
       ): void => {
         if (points.length === 0) return
         ctx.save()
@@ -233,7 +423,7 @@ export default function PdfEditorPanel({
           for (const point of points) {
             const p = pdfPointToCanvas(viewport, point)
             ctx.beginPath()
-            ctx.arc(p.x, p.y, 3, 0, Math.PI * 2)
+            ctx.arc(p.x, p.y, dotRadius, 0, Math.PI * 2)
             ctx.fill()
           }
         }
@@ -252,10 +442,14 @@ export default function PdfEditorPanel({
         const fullSweep = geometry.kind === 'arc' && geometry.endAngle - geometry.startAngle >= 2 * Math.PI - 1e-9
         const closed = CLOSED_GEOMETRY_KINDS.has(geometry.kind) || fullSweep
         const selected = selectedIds.includes(markup.id)
-        const opts = { closed, dots: !isArc }
-        // Selected markups get a halo underneath, then the normal stroke.
-        if (selected) stroke(points, '#4aa3ff', 8, opts)
-        stroke(points, selected ? '#ffffff' : markup.style.color, 2, opts)
+        // Vertices only show up on the selected markup, small and on the top
+        // stroke only - the halo underneath stays plain so they don't double up.
+        if (selected) stroke(points, '#4aa3ff', 8, { closed })
+        stroke(points, selected ? '#ffffff' : markup.style.color, 2, {
+          closed,
+          dots: selected && !isArc,
+          dotRadius: 2
+        })
       }
 
       if (pageNumber === drawPage && drawPoints.length > 0) {
@@ -302,35 +496,6 @@ export default function PdfEditorPanel({
     onSaveCalibration({ pageNumber: viewedPage, ...parsedScale })
     cancelDraw()
     onToolChange('select')
-  }
-
-  function commitMarkup(): void {
-    if (!tool.produces || !tool.buildGeometry || !tool.buildTakeoff) return
-    if (drawPage === undefined || drawPoints.length < (tool.minPoints ?? 2)) return
-    const now = new Date().toISOString()
-    const depth = tool.supportsDepth ? Number.parseFloat(depthValue) : NaN
-    // Depth turns an area takeoff into a volume takeoff (area x depth) on
-    // the SAME geometry/MarkupType - see ToolDefinition.supportsDepth. Left
-    // blank, the tool's own declared takeoff (area) is used unchanged.
-    const takeoff =
-      tool.supportsDepth && Number.isFinite(depth) && depth > 0
-        ? { mode: 'volume' as const, unit: volumeUnit, depth, depthUnit }
-        : tool.buildTakeoff(tool.unitKind === 'area' ? areaUnit : measureUnit)
-    onSaveMarkup({
-      id: crypto.randomUUID(),
-      pageNumber: drawPage,
-      layerId,
-      // The tool declares its type; validateMarkup in the main process still
-      // checks the type/takeoff pairing, so a tool cannot smuggle in an
-      // illegal combination.
-      type: tool.produces.markupType,
-      takeoff,
-      geometry: tool.buildGeometry(drawPoints),
-      style: { color: tool.defaultColor },
-      createdAt: now,
-      updatedAt: now
-    })
-    cancelDraw()
   }
 
   // ---- interaction arbitration ---------------------------------------
@@ -389,16 +554,45 @@ export default function PdfEditorPanel({
         active={active}
         interaction={interaction}
         onDocumentLoaded={onDocumentLoaded}
+        onDocumentReady={(doc) => {
+          docRef.current = doc
+        }}
         onCurrentPageChange={setViewedPage}
         renderOverlay={renderOverlay}
         onPagePointerDown={handlePagePointerDown}
+        onPageDoubleClick={handlePageDoubleClick}
         onMarqueeComplete={handleMarquee}
-        onContextMenu={(x, y) => setMenu({ x, y })}
+        onContextMenu={(x, y) => {
+          // A right-click without a drag always opens the context menu (see
+          // tools/interaction.ts); for these tools it also cancels whatever
+          // is in progress, rather than leaving a half-drawn shape behind it.
+          if (drawing && tool.rightClickCancels) cancelDraw()
+          setMenu({ x, y })
+        }}
         overlayRevision={overlayRevision}
         statusBarSlot={modeToggle}
         statusBarEnd={quantityReadout}
         paletteSlot={<ToolPalette activeToolId={toolId} onSelect={onToolChange} />}
       />
+
+      {tool.dragRect && (
+        <div className="pdf-editor__prompt">
+          <span>{tool.hint}</span>
+          <span>
+            Target cell:{' '}
+            {activeCellLabel ? (
+              activeCellLabel
+            ) : (
+              <span className="pdf-editor__prompt-warning">none - click a cell in the spreadsheet first</span>
+            )}
+          </span>
+          {extractStatus ? (
+            <span className={extractStatus.kind === 'error' ? 'pdf-editor__prompt-warning' : undefined}>
+              {extractStatus.message}
+            </span>
+          ) : null}
+        </div>
+      )}
 
       {drawing && (
         <div className="pdf-editor__prompt">
@@ -492,6 +686,8 @@ export default function PdfEditorPanel({
             <>
               <span>
                 {drawPoints.length} point(s){drawPage ? ` on page ${drawPage}` : ''}
+                {tool.supportsPointUndo && drawPoints.length > 0 ? ' · Ctrl+Z undo' : ''}
+                {tool.supportsPointUndo && redoStack.length > 0 ? ' · Ctrl+R redo' : ''}
               </span>
               {drawPage !== undefined && !manifest.pages.some((p) => p.pageNumber === drawPage && p.calibration) ? (
                 <span className="pdf-editor__prompt-warning">This page is not calibrated.</span>
@@ -541,7 +737,7 @@ export default function PdfEditorPanel({
                   ) : null}
                 </>
               ) : null}
-              <button onClick={commitMarkup} disabled={drawPoints.length < (tool.minPoints ?? 2)}>
+              <button onClick={() => commitMarkup()} disabled={drawPoints.length < (tool.minPoints ?? 2)}>
                 Finish
               </button>
             </>

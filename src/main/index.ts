@@ -1,4 +1,4 @@
-import { app, BrowserWindow, shell } from 'electron'
+import { app, BrowserWindow, Menu, shell } from 'electron'
 import { join } from 'path'
 import { registerManifestIpcHandlers } from './ipc/manifest'
 import { registerPdfDataIpcHandlers } from './ipc/pdfData'
@@ -27,6 +27,15 @@ function createWindow(): void {
 
   registerWindowControlIpcHandlers(mainWindow)
 
+  // DevTools would otherwise be unreachable with no application menu (see
+  // Menu.setApplicationMenu(null) below) - F12 is wired back in directly.
+  mainWindow.webContents.on('before-input-event', (event, input) => {
+    if (input.type === 'keyDown' && input.key === 'F12') {
+      mainWindow.webContents.toggleDevTools()
+      event.preventDefault()
+    }
+  })
+
   mainWindow.once('ready-to-show', () => {
     mainWindow.show()
   })
@@ -50,6 +59,13 @@ const store = new ManifestStore()
 const pdfDataReader = new PdfDataReader(store)
 
 app.whenReady().then(() => {
+  // The window is frameless and has its own in-page menu bar (TitleBar),
+  // but Electron still installs its default menu - invisibly, since there
+  // is no frame to show it in - and that menu's accelerators (Ctrl+R
+  // reload, Ctrl+Z/Ctrl+Shift+Z undo/redo, ...) would otherwise compete
+  // with the app's own keybindings for the same keys.
+  Menu.setApplicationMenu(null)
+
   registerManifestIpcHandlers(store)
   registerPdfDataIpcHandlers(pdfDataReader)
 

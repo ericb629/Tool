@@ -1,7 +1,31 @@
+import { useState } from 'react'
 import type { LinkRecord, QuantityResult, SpreadsheetFileManifest, Uuid } from '../../../shared/manifest'
 
 export const TAKEOFF_SHEET_NAME = 'Takeoff'
 export const TAKEOFF_ROW_INDEX = 0
+
+// Plain grid, not Univer: this app has no real .xlsx read/write yet and the
+// whole feature here is "editable cells + drag-box extraction into one of
+// them" - a full spreadsheet engine (canvas rendering, DI container, formula
+// engine) is disproportionate to that. Revisit if formulas or real .xlsx
+// import/export become an actual requirement.
+const GRID_COLS = 10
+const GRID_ROWS = 25
+
+function colLetter(index: number): string {
+  return String.fromCharCode(65 + index)
+}
+
+function cellRef(col: number, row: number): string {
+  return `${colLetter(col)}${row + 1}`
+}
+
+/** Numeric-looking text is stored as a number; everything else as trimmed text. */
+function parseCellValue(raw: string): string | number {
+  const trimmed = raw.trim()
+  if (trimmed !== '' && Number.isFinite(Number(trimmed))) return Number(trimmed)
+  return trimmed
+}
 
 interface SpreadsheetPanelProps {
   fileId: Uuid
@@ -20,6 +44,9 @@ interface SpreadsheetPanelProps {
   isLinked: boolean
   onEnsureSheet: () => void
   onCreateLink: (link: LinkRecord) => void
+  onUpdateCell: (sheetName: string, cellRef: string, value: string | number) => void
+  /** Reports focus changes so App can target drag-box extraction at this cell. */
+  onActiveCellChange: (cellRef: string | undefined) => void
 }
 
 function formatQuantity(result: QuantityResult | undefined): string {
@@ -29,11 +56,11 @@ function formatQuantity(result: QuantityResult | undefined): string {
   return `${result.value.toFixed(2)} ${result.unit}`
 }
 
-// There is no spreadsheet (xlsx) reading in this app - SpreadsheetSheetRecord
-// only tracks a sheet name (see shared/manifest/types.ts), not cell content.
-// This panel is an honest stand-in for that gap: it lets you create one real
-// sheet and reference row 0 of it for linking, but it does not read or write
-// any actual spreadsheet file. Real cell data is out of scope for this slice.
+// There is no spreadsheet (xlsx) reading in this app - this panel is an
+// honest stand-in for that gap: a real, editable cell grid, plus the
+// pre-existing "create a Takeoff sheet and link its row 0" flow used by Live
+// Link. Both operate on the same sheet record; grid cells are NOT rows of a
+// real workbook, just a sparse cell store (see SpreadsheetSheetRecord.cells).
 export default function SpreadsheetPanel({
   fileId,
   manifest,
@@ -43,9 +70,17 @@ export default function SpreadsheetPanel({
   pdfFileId,
   isLinked,
   onEnsureSheet,
-  onCreateLink
+  onCreateLink,
+  onUpdateCell,
+  onActiveCellChange
 }: SpreadsheetPanelProps) {
   const sheet = manifest.sheets.find((s) => s.sheetName === TAKEOFF_SHEET_NAME)
+
+  // The cell currently being typed into: buffered locally so keystrokes stay
+  // responsive and are not committed (IPC write + manifest re-fetch) on every
+  // keystroke - only on blur, like the app's other draw-then-commit flows.
+  const [editingRef, setEditingRef] = useState<string | undefined>(undefined)
+  const [editingValue, setEditingValue] = useState('')
 
   if (!sheet) {
     return (
@@ -54,6 +89,13 @@ export default function SpreadsheetPanel({
         <button onClick={onEnsureSheet}>Add "{TAKEOFF_SHEET_NAME}" sheet</button>
       </div>
     )
+  }
+
+  const cells = sheet.cells ?? {}
+
+  function commitEditing(): void {
+    if (editingRef !== undefined) onUpdateCell(TAKEOFF_SHEET_NAME, editingRef, parseCellValue(editingValue))
+    setEditingRef(undefined)
   }
 
   function handleLink(): void {
@@ -108,6 +150,49 @@ export default function SpreadsheetPanel({
           </tr>
         </tbody>
       </table>
+
+      <div className="spreadsheet-grid" role="grid" aria-label="Sheet cells">
+        <table className="spreadsheet-grid__table">
+          <thead>
+            <tr>
+              <th className="spreadsheet-grid__corner" />
+              {Array.from({ length: GRID_COLS }, (_, col) => (
+                <th key={col}>{colLetter(col)}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {Array.from({ length: GRID_ROWS }, (_, row) => (
+              <tr key={row}>
+                <th>{row + 1}</th>
+                {Array.from({ length: GRID_COLS }, (_, col) => {
+                  const ref = cellRef(col, row)
+                  const editing = editingRef === ref
+                  const value = editing ? editingValue : (cells[ref] ?? '')
+                  return (
+                    <td key={col}>
+                      <input
+                        className="spreadsheet-grid__cell"
+                        value={value}
+                        onFocus={() => {
+                          setEditingRef(ref)
+                          setEditingValue(String(cells[ref] ?? ''))
+                          onActiveCellChange(ref)
+                        }}
+                        onChange={(e) => setEditingValue(e.target.value)}
+                        onBlur={commitEditing}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') e.currentTarget.blur()
+                        }}
+                      />
+                    </td>
+                  )
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   )
 }

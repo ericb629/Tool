@@ -49,6 +49,12 @@ export default function App() {
   // each PDF tab still remembers its own tool, same as before the strip
   // moved out. Selection stays inside PdfEditorPanel; only choice moved.
   const [toolByTab, setToolByTab] = useState<Record<string, ToolId>>({})
+  // The spreadsheet cell the Extract Text tool writes into - whichever cell
+  // was last focused, across tabs, since extraction happens from a PDF tab
+  // while the target lives on a spreadsheet tab.
+  const [activeCell, setActiveCell] = useState<{ fileId: Uuid; sheetName: string; cellRef: string } | undefined>(
+    undefined
+  )
 
   // Live Link is synthesized rather than stored, so docking is just a
   // question of where it renders - the tab list never has to be rewritten.
@@ -139,6 +145,14 @@ export default function App() {
     openTab({ id: tabIdForFile(result.fileId), kind: 'pdf', title, closeable: true, fileId: result.fileId })
   })
 
+  const handleCreateSpreadsheet = guard(async () => {
+    const result = await window.api.project.createSpreadsheet()
+    setProjectState(result.state)
+    const entry = result.state.files.find((f) => f.fileId === result.fileId)
+    const title = entry?.relativePath.split('/').pop() ?? 'Sheet'
+    openTab({ id: tabIdForFile(result.fileId), kind: 'spreadsheet', title, closeable: true, fileId: result.fileId })
+  })
+
   const handleSaveCalibration = guard(async (fileId: Uuid, calibration: PageCalibration) => {
     await window.api.manifest.updateCalibration(fileId, calibration)
     await window.api.manifest.save()
@@ -167,6 +181,21 @@ export default function App() {
     await window.api.manifest.save()
     await refreshState()
   })
+
+  const handleUpdateCell = guard(async (fileId: Uuid, sheetName: string, cellRef: string, value: string | number) => {
+    await window.api.manifest.updateCell(fileId, sheetName, cellRef, value)
+    await window.api.manifest.save()
+    await refreshState()
+  })
+
+  // Returns an error message to show inline (no cell has been clicked yet);
+  // undefined means the write is in flight. Sync so PdfEditorPanel can show
+  // the outcome immediately rather than waiting on the IPC round trip.
+  function handleExtractText(text: string): string | undefined {
+    if (!activeCell) return 'No active cell - click a cell in the spreadsheet first.'
+    void handleUpdateCell(activeCell.fileId, activeCell.sheetName, activeCell.cellRef, text)
+    return undefined
+  }
 
   // ---- derived quantities ----
 
@@ -225,6 +254,8 @@ export default function App() {
             onDocumentLoaded={(pageCount) => handleDocumentLoaded(tab.fileId, pageCount)}
             onSaveCalibration={(calibration) => handleSaveCalibration(tab.fileId, calibration)}
             onSaveMarkup={(markup) => handleSaveMarkup(tab.fileId, markup)}
+            onExtractText={handleExtractText}
+            activeCellLabel={activeCell?.cellRef}
           />
         )
       }
@@ -254,6 +285,10 @@ export default function App() {
             isLinked={Boolean(rowLink)}
             onEnsureSheet={() => handleEnsureSheet(tab.fileId)}
             onCreateLink={handleCreateLink}
+            onUpdateCell={(sheetName, cellRef, value) => handleUpdateCell(tab.fileId, sheetName, cellRef, value)}
+            onActiveCellChange={(cellRef) =>
+              setActiveCell(cellRef ? { fileId: tab.fileId, sheetName: TAKEOFF_SHEET_NAME, cellRef } : undefined)
+            }
           />
         )
       }
@@ -287,9 +322,9 @@ export default function App() {
   const activeTab = displayedTabs.find((t) => t.id === activeTabId)
   const NOT_BUILT = 'Not built yet'
 
-  // The markup tool strip (Linear/Polyline/Area/Circle) only means anything
-  // against the active PDF tab's page calibration - same gating ToolPalette
-  // used to do for these tools before they moved out to the TabBar.
+  // The markup tool strip (Polyline/Area/Circle/Extract Text) needs an
+  // active PDF tab; the markup-producing tools additionally need that page
+  // calibrated (Extract Text does not - see MarkupToolBar).
   const activePdfManifest =
     activeTab?.kind === 'pdf'
       ? (() => {
@@ -297,8 +332,7 @@ export default function App() {
           return entry?.manifest.fileType === 'pdf' ? entry.manifest : undefined
         })()
       : undefined
-  const markupToolsDisabled = !activePdfManifest || !activePdfManifest.pages.some((p) => p.calibration)
-  const markupToolsDisabledReason = !activePdfManifest ? 'Open a PDF to use these tools' : 'Calibrate a page first'
+  const markupToolsUncalibrated = !activePdfManifest || !activePdfManifest.pages.some((p) => p.calibration)
   const activeMarkupToolId: ToolId = activeTab ? (toolByTab[activeTab.id] ?? 'select') : 'select'
   function setActiveMarkupTool(id: ToolId): void {
     if (activeTab) setToolByTab((prev) => ({ ...prev, [activeTab.id]: id }))
@@ -361,12 +395,13 @@ export default function App() {
         onClose={closeTab}
         onToggleDock={() => setLiveLinkPlacement((p) => (p === 'sidebar' ? 'tab' : 'sidebar'))}
         onImportPdf={handleImportPdf}
+        onNewSpreadsheet={handleCreateSpreadsheet}
         toolBar={
           <MarkupToolBar
             activeToolId={activeMarkupToolId}
             onSelect={setActiveMarkupTool}
-            disabled={markupToolsDisabled}
-            disabledReason={markupToolsDisabledReason}
+            noPdfTab={!activePdfManifest}
+            uncalibrated={markupToolsUncalibrated}
           />
         }
         openMenu={

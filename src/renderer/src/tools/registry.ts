@@ -3,8 +3,8 @@ import {
   Hand as HandIcon,
   MousePointer2 as SelectIcon,
   Ruler as RulerIcon,
+  ScanText as ScanTextIcon,
   Shapes as ShapesIcon,
-  Slash as SlashIcon,
   Spline as SplineIcon,
   type LucideIcon
 } from 'lucide-react'
@@ -17,7 +17,7 @@ import type {
   PdfPoint
 } from '../../../shared/manifest'
 
-export type ToolId = 'select' | 'pan' | 'calibrate' | 'linear' | 'polyline' | 'area' | 'circle'
+export type ToolId = 'select' | 'pan' | 'calibrate' | 'polyline' | 'area' | 'circle' | 'extract'
 
 /** Which unit dropdown a tool's takeoff needs. Absent means 'linear'. */
 export type TakeoffUnitKind = 'linear' | 'area'
@@ -65,6 +65,29 @@ export interface ToolDefinition {
    * validateMarkup already allows both modes for the same MarkupType.
    */
   supportsDepth?: boolean
+  /**
+   * Double-clicking places its final point and immediately commits, instead
+   * of requiring a separate Finish click. Detected via the native `dblclick`
+   * event (PdfPageCanvas/PdfViewer's onDoubleClick) rather than
+   * PointerEvent.detail, which is not a reliable click-count signal here;
+   * the handler trims the extra point the pair's second click already
+   * placed before committing. See PdfEditorPanel.handlePageDoubleClick.
+   */
+  dblClickFinish?: boolean
+  /** A right-click (no drag) cancels the in-progress draw, in addition to opening the context menu it already opens. */
+  rightClickCancels?: boolean
+  /** Ctrl+Z/Ctrl+R step back/forward through the in-progress draw's points. */
+  supportsPointUndo?: boolean
+  /**
+   * This tool's gesture is a single rectangle drag, not click-to-place-points
+   * - it does not produce a markup and is not `isDrawingTool`. Reuses the
+   * SAME marquee-drag mechanism PdfViewer already has for multi-select
+   * (screen drag -> per-page PdfPoint rect), so resolveInteraction routes its
+   * left-drag to 'marquee' unconditionally rather than through the
+   * mouse/arrow mode toggle that governs Select. See PdfEditorPanel's
+   * handleMarquee, which branches on this flag instead of always selecting.
+   */
+  dragRect?: boolean
   /** Stroke color new markups from this tool are saved with. */
   defaultColor: string
   /** Icon shown by whichever palette renders this tool. */
@@ -123,27 +146,9 @@ export const TOOLS: ToolDefinition[] = [
     icon: RulerIcon
   },
   {
-    id: 'linear',
-    label: 'Linear',
-    hint: 'Click two points to measure a straight distance',
-    cursor: 'crosshair',
-    exactPoints: 2,
-    minPoints: 2,
-    produces: {
-      markupType: 'polyline',
-      takeoffMode: 'linear',
-      geometryKind: 'polyline'
-    },
-    defaultColor: '#e63946',
-    icon: SlashIcon,
-    inTopBar: true,
-    buildGeometry: (points) => ({ kind: 'polyline', points }),
-    buildTakeoff: (unit) => ({ mode: 'linear', unit: unit as LinearUnit })
-  },
-  {
     id: 'polyline',
     label: 'Polyline',
-    hint: 'Click along a bent run, then finish',
+    hint: 'Click to place points, double-click to place the last one and finish',
     cursor: 'crosshair',
     minPoints: 2,
     produces: {
@@ -154,13 +159,16 @@ export const TOOLS: ToolDefinition[] = [
     defaultColor: '#e63946',
     icon: SplineIcon,
     inTopBar: true,
+    dblClickFinish: true,
+    rightClickCancels: true,
+    supportsPointUndo: true,
     buildGeometry: (points) => ({ kind: 'polyline', points }),
     buildTakeoff: (unit) => ({ mode: 'linear', unit: unit as LinearUnit })
   },
   {
     id: 'area',
     label: 'Area',
-    hint: 'Click each corner, then finish',
+    hint: 'Click each corner, double-click to place the last one and close the shape',
     cursor: 'crosshair',
     minPoints: 3,
     produces: {
@@ -173,6 +181,9 @@ export const TOOLS: ToolDefinition[] = [
     defaultColor: '#e9c46a',
     icon: ShapesIcon,
     inTopBar: true,
+    dblClickFinish: true,
+    rightClickCancels: true,
+    supportsPointUndo: true,
     buildGeometry: (points) => ({ kind: 'polygon', points }),
     buildTakeoff: (unit) => ({ mode: 'area', unit: unit as AreaUnit })
   },
@@ -200,6 +211,16 @@ export const TOOLS: ToolDefinition[] = [
       endAngle: 2 * Math.PI
     }),
     buildTakeoff: (unit) => ({ mode: 'area', unit: unit as AreaUnit })
+  },
+  {
+    id: 'extract',
+    label: 'Extract Text',
+    hint: 'Drag a box around text to pull it into the active spreadsheet cell',
+    cursor: 'crosshair',
+    dragRect: true,
+    defaultColor: '#f4a261',
+    icon: ScanTextIcon,
+    inTopBar: true
   }
 ]
 

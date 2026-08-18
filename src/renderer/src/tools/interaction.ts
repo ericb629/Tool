@@ -20,6 +20,13 @@ export interface InteractionConfig {
 }
 
 export function resolveInteraction(tool: ToolDefinition, mode: InteractionMode): InteractionConfig {
+  if (tool.dragRect) {
+    // A rectangle drag is this tool's entire gesture - unlike Select, it does
+    // not care about the mouse/arrow mode toggle. Reuses the SAME 'marquee'
+    // drag behavior PdfViewer already implements for multi-select; the
+    // handler branches on which tool is active, not the drag mechanism.
+    return { cursor: tool.cursor, leftDrag: 'marquee', rightDrag: 'pan' }
+  }
   if (isDrawingTool(tool)) {
     // Left places points, so panning moves to the right button.
     return { cursor: tool.cursor, leftDrag: 'none', rightDrag: 'pan' }

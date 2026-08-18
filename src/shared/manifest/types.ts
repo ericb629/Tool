@@ -211,6 +211,14 @@ export interface SpreadsheetFileManifest {
 
 export interface SpreadsheetSheetRecord {
   sheetName: string
+  /**
+   * Sparse, keyed by "A1"-style cell reference. There is no real .xlsx
+   * reading/writing in this app (see SpreadsheetPanel) - this is the
+   * primitive cell store for the plain grid: editable text/number cells,
+   * and the destination for drag-box text extraction from a PDF. Optional
+   * so existing sidecar files without it just read as an empty sheet.
+   */
+  cells?: Record<string, string | number>
 }
 
 export interface SpreadsheetRowReference {

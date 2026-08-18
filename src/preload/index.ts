@@ -20,7 +20,9 @@ const api = {
     addFile: (relativePath: string, fileType: FileType): Promise<ProjectState> =>
       ipcRenderer.invoke('project:addFile', relativePath, fileType),
     importPdf: (): Promise<{ state: ProjectState; fileId: string } | null> =>
-      ipcRenderer.invoke('project:importPdf')
+      ipcRenderer.invoke('project:importPdf'),
+    createSpreadsheet: (): Promise<{ state: ProjectState; fileId: string }> =>
+      ipcRenderer.invoke('project:createSpreadsheet')
   },
   // pdf.js data transport. Only the chunks pdf.js asks for cross this
   // boundary; a whole document is never transferred. See src/main/pdfData.ts.
@@ -40,6 +42,8 @@ const api = {
       ipcRenderer.invoke('manifest:ensurePages', fileId, pageCount),
     setSheets: (fileId: string, sheets: SpreadsheetSheetRecord[]): Promise<void> =>
       ipcRenderer.invoke('manifest:setSheets', fileId, sheets),
+    updateCell: (fileId: string, sheetName: string, cellRef: string, value: string | number): Promise<void> =>
+      ipcRenderer.invoke('manifest:updateCell', fileId, sheetName, cellRef, value),
     updateLink: (link: LinkRecord): Promise<void> => ipcRenderer.invoke('manifest:updateLink', link),
     save: (): Promise<void> => ipcRenderer.invoke('manifest:save'),
     getState: (): Promise<ProjectState> => ipcRenderer.invoke('manifest:getState')

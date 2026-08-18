@@ -57,6 +57,13 @@ export function registerManifestIpcHandlers(store: ManifestStore): void {
     }
   )
 
+  ipcMain.handle(
+    'project:createSpreadsheet',
+    async (): Promise<{ state: ProjectState; fileId: string }> => {
+      return store.createSpreadsheet()
+    }
+  )
+
   ipcMain.handle('manifest:updateMarkup', async (_event, fileId: string, markup: MarkupObject): Promise<void> => {
     store.updateMarkup(fileId, markup)
   })
@@ -82,6 +89,13 @@ export function registerManifestIpcHandlers(store: ManifestStore): void {
     'manifest:setSheets',
     async (_event, fileId: string, sheets: SpreadsheetSheetRecord[]): Promise<void> => {
       store.setSheets(fileId, sheets)
+    }
+  )
+
+  ipcMain.handle(
+    'manifest:updateCell',
+    async (_event, fileId: string, sheetName: string, cellRef: string, value: string | number): Promise<void> => {
+      store.updateCell(fileId, sheetName, cellRef, value)
     }
   )
 

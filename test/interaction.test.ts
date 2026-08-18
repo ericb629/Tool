@@ -8,7 +8,7 @@ const RIGHT = 2
 
 const select = TOOL_BY_ID.select
 const pan = TOOL_BY_ID.pan
-const linear = TOOL_BY_ID.linear
+const polyline = TOOL_BY_ID.polyline
 const calibrate = TOOL_BY_ID.calibrate
 
 describe('interaction arbitration', () => {
@@ -45,7 +45,7 @@ describe('interaction arbitration', () => {
     // The rule this suite exists to pin down: right-drag PANS here, and
     // marquees when a selection tool is active.
     it.each([
-      ['linear', linear],
+      ['polyline', polyline],
       ['calibrate', calibrate]
     ])('%s: left places points and right-drag pans', (_name, tool) => {
       for (const mode of ['mouse', 'arrow'] as const) {
@@ -69,7 +69,7 @@ describe('interaction arbitration', () => {
     })
 
     it('keeps the tool cursor rather than a grab hand', () => {
-      expect(resolveInteraction(linear, 'mouse').cursor).toBe(linear.cursor)
+      expect(resolveInteraction(polyline, 'mouse').cursor).toBe(polyline.cursor)
     })
   })
 

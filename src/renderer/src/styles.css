@@ -750,6 +750,59 @@ body,
   font-style: italic;
 }
 
+.spreadsheet-grid {
+  margin-top: 12px;
+  overflow: auto;
+}
+
+.spreadsheet-grid__table {
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.spreadsheet-grid__table th {
+  position: sticky;
+  top: 0;
+  background: #2a2a2a;
+  color: #aaa;
+  font-weight: 500;
+  padding: 2px 4px;
+  border: 1px solid #3a3a3a;
+  min-width: 22px;
+}
+
+.spreadsheet-grid__table th:first-child {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+}
+
+.spreadsheet-grid__corner {
+  z-index: 2;
+}
+
+.spreadsheet-grid__table td {
+  border: 1px solid #3a3a3a;
+  padding: 0;
+}
+
+.spreadsheet-grid__cell {
+  width: 72px;
+  box-sizing: border-box;
+  background: #1e1e1e;
+  color: #e8e8e8;
+  border: none;
+  padding: 3px 5px;
+  font-size: 12px;
+  font-family: inherit;
+}
+
+.spreadsheet-grid__cell:focus {
+  outline: 2px solid #4aa3ff;
+  outline-offset: -2px;
+  background: #24304a;
+}
+
 /* ---- tab shell ---- */
 
 .app {

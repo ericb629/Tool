@@ -81,6 +81,34 @@ describe('ManifestStore round-trip', () => {
     assert.ok(state.layers[0].id)
   })
 
+  it('createSpreadsheet writes a real empty file and registers it', async () => {
+    const root = await newProjectRoot()
+    const store = new ManifestStore()
+    await store.create(root)
+
+    const { state, fileId } = await store.createSpreadsheet('Takeoff')
+    const entry = state.files.find((f) => f.fileId === fileId)
+    assert.ok(entry, 'file entry was registered')
+    assert.equal(entry.relativePath, 'sheets/Takeoff.csv')
+    assert.equal(entry.sourceStatus, 'ok')
+    const onDisk = await fs.readFile(join(root, 'sheets', 'Takeoff.csv'), 'utf8')
+    assert.equal(onDisk, '')
+
+    const reader = await new ManifestStore().open(root)
+    const rereadEntry = reader.files.find((f) => f.fileId === fileId)
+    assert.ok(rereadEntry && rereadEntry.manifest.fileType === 'spreadsheet')
+  })
+
+  it('createSpreadsheet gives a second sheet with the same name a unique file name', async () => {
+    const root = await newProjectRoot()
+    const store = new ManifestStore()
+    await store.create(root)
+    await store.createSpreadsheet('Takeoff')
+    const second = await store.createSpreadsheet('Takeoff')
+    const entry = second.state.files.find((f) => f.fileId === second.fileId)
+    assert.equal(entry?.relativePath, 'sheets/Takeoff-1.csv')
+  })
+
   it('rejects an invalid type/takeoff combination before it reaches disk', async () => {
     const root = await newProjectRoot()
     const store = new ManifestStore()
@@ -127,6 +155,58 @@ describe('ManifestStore round-trip', () => {
       { x: 0, y: 0 },
       { x: 200, y: 0 }
     ])
+  })
+})
+
+describe('ManifestStore.updateCell', () => {
+  async function sheetWithFile(): Promise<{ store: ManifestStore; root: string; fileId: string }> {
+    const root = await newProjectRoot()
+    const store = new ManifestStore()
+    await store.create(root)
+    const fileId = store.addFile('sheets/takeoff.xlsx', 'spreadsheet')
+    store.setSheets(fileId, [{ sheetName: 'Takeoff' }])
+    return { store, root, fileId }
+  }
+
+  it('persists a cell value across close and reopen', async () => {
+    const { store, root, fileId } = await sheetWithFile()
+    store.updateCell(fileId, 'Takeoff', 'B3', 'RCP')
+    store.updateCell(fileId, 'Takeoff', 'C3', 24)
+    await store.save()
+
+    const state = await new ManifestStore().open(root)
+    const file = state.files.find((f) => f.fileId === fileId)
+    assert.ok(file && file.manifest.fileType === 'spreadsheet')
+    if (file.manifest.fileType !== 'spreadsheet') return
+    const sheet = file.manifest.sheets.find((s) => s.sheetName === 'Takeoff')
+    assert.deepEqual(sheet?.cells, { B3: 'RCP', C3: 24 })
+  })
+
+  it('clears a cell instead of storing an empty string', async () => {
+    const { store, fileId } = await sheetWithFile()
+    store.updateCell(fileId, 'Takeoff', 'A1', 'temp')
+    store.updateCell(fileId, 'Takeoff', 'A1', '')
+    const state = store.getState()
+    const file = state.files.find((f) => f.fileId === fileId)
+    assert.ok(file && file.manifest.fileType === 'spreadsheet')
+    if (file.manifest.fileType !== 'spreadsheet') return
+    assert.deepEqual(file.manifest.sheets[0].cells, {})
+  })
+
+  it('refuses to hold cells on a PDF file', async () => {
+    const root = await newProjectRoot()
+    const store = new ManifestStore()
+    await store.create(root)
+    const fileId = store.addFile('pdfs/sheet.pdf', 'pdf')
+    assert.throws(() => store.updateCell(fileId, 'Takeoff', 'A1', 'x'), /not a spreadsheet/)
+  })
+
+  it('throws when the sheet does not exist yet', async () => {
+    const root = await newProjectRoot()
+    const store = new ManifestStore()
+    await store.create(root)
+    const fileId = store.addFile('sheets/takeoff.xlsx', 'spreadsheet')
+    assert.throws(() => store.updateCell(fileId, 'Takeoff', 'A1', 'x'), /does not exist/)
   })
 })
 

@@ -45,10 +45,18 @@ interface PdfViewerProps {
   active?: boolean
   interaction: InteractionConfig
   onDocumentLoaded?: (pageCount: number) => void
+  /**
+   * Fires with the opened PDFDocumentProxy itself, e.g. so the drag-box text
+   * extraction tool can call `doc.getPage(n).getTextContent()` on demand.
+   * Rendering never needs this - it is the one caller that reaches past the
+   * render path for something pdf.js already loaded.
+   */
+  onDocumentReady?: (doc: PDFDocumentProxy) => void
   /** Fires when the page centered in the viewport changes, e.g. for calibration-by-scale to know which page to stamp. */
   onCurrentPageChange?: (pageNumber: number) => void
   renderOverlay?: (ctx: CanvasRenderingContext2D, context: PageOverlayContext) => void
   onPagePointerDown?: (event: React.PointerEvent<HTMLCanvasElement>, context: PageOverlayContext) => void
+  onPageDoubleClick?: (event: React.MouseEvent<HTMLCanvasElement>, context: PageOverlayContext) => void
   onMarqueeComplete?: (selections: PageRectSelection[], additive: boolean) => void
   onContextMenu?: (clientX: number, clientY: number) => void
   overlayRevision?: string | number
@@ -64,9 +72,11 @@ export default function PdfViewer({
   active = true,
   interaction,
   onDocumentLoaded,
+  onDocumentReady,
   onCurrentPageChange,
   renderOverlay,
   onPagePointerDown,
+  onPageDoubleClick,
   onMarqueeComplete,
   onContextMenu,
   overlayRevision,
@@ -187,6 +197,7 @@ export default function PdfViewer({
         setBasePageSizes(sizes)
         setStatus('ready')
         onDocumentLoaded?.(loaded.numPages)
+        onDocumentReady?.(loaded)
       } catch (err) {
         if (cancelled) return
         setStatus('error')
@@ -611,11 +622,26 @@ export default function PdfViewer({
     // that page's live viewport - the conversion stays on the coordinate
     // boundary and a marquee spanning pages is handled per page.
     const selections: PageRectSelection[] = []
+    // pageContexts.current is a Map ordered by page REGISTRATION (mount
+    // order), not page number or drag order - a drag that starts on one
+    // page and clips into its neighbor (adjacent sheets in a continuous
+    // scroll, e.g. a callout right at the page 29/30 boundary) could
+    // otherwise put the WRONG page first. Extract Text takes selections[0]
+    // as ITS page, so this has to be the page the drag actually started on.
+    let startPageNumber: number | undefined
     for (const [pageNumber, context] of pageContexts.current) {
       const canvasRect = context.canvas.getBoundingClientRect()
       const overlapsX = Math.min(g.startClientX, event.clientX) <= canvasRect.right && Math.max(g.startClientX, event.clientX) >= canvasRect.left
       const overlapsY = Math.min(g.startClientY, event.clientY) <= canvasRect.bottom && Math.max(g.startClientY, event.clientY) >= canvasRect.top
       if (!overlapsX || !overlapsY) continue
+      if (
+        g.startClientX >= canvasRect.left &&
+        g.startClientX <= canvasRect.right &&
+        g.startClientY >= canvasRect.top &&
+        g.startClientY <= canvasRect.bottom
+      ) {
+        startPageNumber = pageNumber
+      }
       // The overlay canvas is a window onto the page, not the whole page, so
       // its origin within the page has to be added back before converting.
       const a = canvasToPdfPoint(
@@ -629,6 +655,9 @@ export default function PdfViewer({
         event.clientY - canvasRect.top + context.origin.y
       )
       selections.push({ pageNumber, rect: rectFromCorners(a, b) })
+    }
+    if (startPageNumber !== undefined) {
+      selections.sort((x, y) => (x.pageNumber === startPageNumber ? -1 : y.pageNumber === startPageNumber ? 1 : 0))
     }
     onMarqueeComplete?.(selections, g.additive)
   }
@@ -790,6 +819,7 @@ export default function PdfViewer({
                     visible={visibleRegions.get(pageNumber)}
                     renderOverlay={renderOverlay}
                     onPointerDown={onPagePointerDown}
+                    onDoubleClick={onPageDoubleClick}
                     onViewportReady={registerPage}
                     overlayRevision={overlayRevision}
                     holdPreview={!foregroundReady && !visibleRegions.has(pageNumber)}

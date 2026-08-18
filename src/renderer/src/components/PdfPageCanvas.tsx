@@ -103,6 +103,8 @@ interface PdfPageCanvasProps {
   visible?: PageRegion
   renderOverlay?: (ctx: CanvasRenderingContext2D, context: PageOverlayContext) => void
   onPointerDown?: (event: React.PointerEvent<HTMLCanvasElement>, context: PageOverlayContext) => void
+  /** Native double-click - see PdfEditorPanel's dblClickFinish handling. */
+  onDoubleClick?: (event: React.MouseEvent<HTMLCanvasElement>, context: PageOverlayContext) => void
   /**
    * Publishes this page's live viewport to the viewer, so gestures that span
    * pages (marquee) can convert screen coordinates into THIS page's
@@ -169,6 +171,7 @@ export default function PdfPageCanvas({
   visible,
   renderOverlay,
   onPointerDown,
+  onDoubleClick,
   onViewportReady,
   overlayRevision = 0,
   holdPreview = false,
@@ -860,6 +863,16 @@ export default function PdfPageCanvas({
           // calibration and takeoff for several seconds while still blank.
           if (!painted) return
           onPointerDown(event, {
+            pageNumber,
+            viewport,
+            canvas: overlay,
+            origin: { x: overlayRegion.left, y: overlayRegion.top }
+          })
+        }}
+        onDoubleClick={(event) => {
+          const overlay = overlayCanvasRef.current
+          if (!overlay || !viewport || !overlayRegion || !onDoubleClick || !painted) return
+          onDoubleClick(event, {
             pageNumber,
             viewport,
             canvas: overlay,

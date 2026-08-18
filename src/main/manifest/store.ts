@@ -194,6 +194,31 @@ export class ManifestStore {
     return { state: this.getState(), fileId }
   }
 
+  /**
+   * Creates a new spreadsheet file entry backed by a real, empty .csv on
+   * disk - not .xlsx, because there is no real spreadsheet-file reading or
+   * writing in this app (see SpreadsheetPanel), and naming an empty file
+   * .xlsx would claim a format it does not actually produce. The cell data
+   * this app cares about lives in the sidecar (SpreadsheetSheetRecord.cells),
+   * same as a PDF's markups; the on-disk file exists so the project stays a
+   * folder of real, openable files per file entry, per the project's
+   * persistence design.
+   */
+  async createSpreadsheet(baseName = 'Sheet'): Promise<{ state: ProjectState; fileId: Uuid }> {
+    if (!this.rootPath || !this.project) throw new Error('No project is open')
+
+    const sheetsDir = join(this.rootPath, 'sheets')
+    await fs.mkdir(sheetsDir, { recursive: true })
+
+    const destAbsolutePath = await uniqueDestPath(sheetsDir, `${baseName}.csv`)
+    await fs.writeFile(destAbsolutePath, '')
+
+    const relativePath = toManifestRelativePath(this.rootPath, destAbsolutePath)
+    const fileId = this.addFile(relativePath, 'spreadsheet')
+    await this.save()
+    return { state: this.getState(), fileId }
+  }
+
   updateMarkup(fileId: Uuid, markup: MarkupObject): void {
     const file = this.requireFile(fileId)
     if (file.fileType !== 'pdf') {
@@ -249,6 +274,31 @@ export class ManifestStore {
       throw new Error(`File ${fileId} is not a spreadsheet; cannot hold sheets`)
     }
     file.sheets = sheets
+    file.updatedAt = new Date().toISOString()
+    this.dirtyFileIds.add(fileId)
+  }
+
+  /**
+   * Upserts one cell's value ("A1"-style ref) on an existing sheet - the
+   * primitive cell store described on SpreadsheetSheetRecord. An empty
+   * string clears the cell rather than storing it, so the sparse map does
+   * not accumulate empty entries for every cell a user clicked through.
+   */
+  updateCell(fileId: Uuid, sheetName: string, cellRef: string, value: string | number): void {
+    const file = this.requireFile(fileId)
+    if (file.fileType !== 'spreadsheet') {
+      throw new Error(`File ${fileId} is not a spreadsheet; cannot hold cells`)
+    }
+    const sheet = file.sheets.find((s) => s.sheetName === sheetName)
+    if (!sheet) {
+      throw new Error(`Sheet '${sheetName}' does not exist on file ${fileId}`)
+    }
+    sheet.cells ??= {}
+    if (value === '') {
+      delete sheet.cells[cellRef]
+    } else {
+      sheet.cells[cellRef] = value
+    }
     file.updatedAt = new Date().toISOString()
     this.dirtyFileIds.add(fileId)
   }

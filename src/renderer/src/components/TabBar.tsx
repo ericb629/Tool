@@ -9,6 +9,7 @@ interface TabBarProps {
   onClose: (id: string) => void
   onToggleDock: () => void
   onImportPdf: () => void
+  onNewSpreadsheet: () => void
   openMenu: React.ReactNode
   /** The markup tool icon strip - rendered first, pushed to the far left. */
   toolBar?: React.ReactNode
@@ -23,6 +24,7 @@ export default function TabBar({
   onClose,
   onToggleDock,
   onImportPdf,
+  onNewSpreadsheet,
   openMenu,
   toolBar
 }: TabBarProps) {
@@ -63,6 +65,13 @@ export default function TabBar({
         {openMenu}
         <button onClick={onImportPdf} disabled={!canOpen} title={canOpen ? 'Copy a PDF into this project' : 'Open or create a project first'}>
           Import PDF…
+        </button>
+        <button
+          onClick={onNewSpreadsheet}
+          disabled={!canOpen}
+          title={canOpen ? 'Create a new spreadsheet in this project' : 'Open or create a project first'}
+        >
+          New Spreadsheet
         </button>
         <button
           onClick={onToggleDock}
